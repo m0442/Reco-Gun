@@ -1,0 +1,9 @@
+# Secrets - never commit real keys
+config.env
+
+# Scan output
+results/
+*.log
+
+# Local wordlists/resolvers you may drop in per-machine
+resolvers.txt
