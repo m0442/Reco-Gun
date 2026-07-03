@@ -35,6 +35,7 @@ ORIGIN_IP_DISCOVERY=false
 RESOLVERS_FILE="${RESOLVERS_FILE:-resolvers.txt}"
 WORDLISTS_DIR="${WORDLISTS_DIR:-wordlists}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-300}"
+CRAWL_TIMEOUT_SECONDS="${CRAWL_TIMEOUT_SECONDS:-1800}"
 PARALLEL_JOBS="${PARALLEL_JOBS:-8}"
 ACTIVE_SUBDOMAINS=""
 CURRENT_LOG=""
@@ -72,9 +73,10 @@ run_tool() {
     local tool_name="$1"
     local command="$2"
     local output_file="$3"
+    local tool_timeout="${4:-$TIMEOUT_SECONDS}"
 
     log_message "[+] Running $tool_name..." "$BLUE"
-    if timeout "$TIMEOUT_SECONDS" bash -c "$command" > "$output_file" 2>> "$CURRENT_LOG"; then
+    if timeout "$tool_timeout" bash -c "$command" > "$output_file" 2>> "$CURRENT_LOG"; then
         if [ -s "$output_file" ]; then
             local count
             count=$(count_unique_results "$output_file")
@@ -91,14 +93,16 @@ run_tool() {
 }
 
 # Run an array of "name:command" pairs concurrently, capped at PARALLEL_JOBS.
+# Optional 3rd arg overrides the per-tool timeout (default: TIMEOUT_SECONDS).
 run_tools_parallel() {
     local -n tools_ref="$1"
     local output_dir="$2"
+    local job_timeout="${3:-$TIMEOUT_SECONDS}"
 
     for tool in "${tools_ref[@]}"; do
         local tool_name="${tool%%:*}"
         local tool_command="${tool#*:}"
-        run_tool "$tool_name" "$tool_command" "$output_dir/${tool_name}.txt" &
+        run_tool "$tool_name" "$tool_command" "$output_dir/${tool_name}.txt" "$job_timeout" &
         while [ "$(jobs -r -p | wc -l)" -ge "$PARALLEL_JOBS" ]; do
             wait -n
         done
@@ -588,14 +592,17 @@ process_domain() {
     if [ -s "$ACTIVE_SUBDOMAINS" ]; then
         log_message "[*] Running crawling tools..." "$BLUE"
 
+        # These process every active subdomain (can be hundreds), so they need
+        # real internal concurrency, not just the outer parallel-tools job
+        # pool - and a much longer timeout than quick API-based sources get.
         local CRAWL_TOOLS=()
         command -v waymore &>/dev/null && CRAWL_TOOLS+=("waymore:waymore -i $domain -mode U -oU /dev/stdout")
-        command -v waybackurls &>/dev/null && CRAWL_TOOLS+=("waybackurls:cat $ACTIVE_SUBDOMAINS | waybackurls")
-        command -v gau &>/dev/null && CRAWL_TOOLS+=("gau-crawl:cat $ACTIVE_SUBDOMAINS | gau")
-        command -v katana &>/dev/null && CRAWL_TOOLS+=("katana:katana -d 5 -jc -ct 1h -aff -fx -list $ACTIVE_SUBDOMAINS -silent")
+        command -v waybackurls &>/dev/null && CRAWL_TOOLS+=("waybackurls:cat $ACTIVE_SUBDOMAINS | xargs -P $PARALLEL_JOBS -I{} sh -c 'echo {} | waybackurls' 2>/dev/null")
+        command -v gau &>/dev/null && CRAWL_TOOLS+=("gau-crawl:cat $ACTIVE_SUBDOMAINS | gau --threads $PARALLEL_JOBS")
+        command -v katana &>/dev/null && CRAWL_TOOLS+=("katana:katana -d 3 -jc -aff -fx -list $ACTIVE_SUBDOMAINS -c $PARALLEL_JOBS -silent")
 
         if [ ${#CRAWL_TOOLS[@]} -gt 0 ]; then
-            run_tools_parallel CRAWL_TOOLS "$domain_output_dir/crawling"
+            run_tools_parallel CRAWL_TOOLS "$domain_output_dir/crawling" "$CRAWL_TIMEOUT_SECONDS"
         fi
 
         local crawl_final="$domain_output_dir/crawling/final_crawling_results.txt"
@@ -897,7 +904,7 @@ mkdir -p "$OUTPUT_DIR"
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v4.1                |"
+echo "  |              RecoGun v4.2                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  +=========================================+"
 echo -e "${RESET}"

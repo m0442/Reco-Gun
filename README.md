@@ -105,6 +105,23 @@ just re-run the same domain periodically, e.g. from cron:
 0 */6 * * * cd /path/to/RecoGun && ./recogun.sh -d target.com >> cron.log 2>&1
 ```
 
+## Troubleshooting: crawling tools erroring out on large targets
+
+If `waybackurls`/`gau-crawl`/`katana` show `[X] Error ... Skipping to the next
+tool` right after several minutes, it's almost always a timeout, not a real
+tool failure — those three process every active subdomain, and a target with
+a few hundred live hosts can take well past the default budget. The crawling
+phase already fans work out internally (`gau --threads`, `waybackurls` via
+`xargs -P`, `katana -c`, all scaled by `-j`), but if you're scanning a large
+target, bump the crawl-specific timeout in `config.env`:
+
+```bash
+CRAWL_TIMEOUT_SECONDS=3600   # default is 1800 (30 min)
+```
+
+This is separate from `TIMEOUT_SECONDS`, which stays short (default 300s)
+for the quick API-based passive-enum sources.
+
 ## Methodology (what each phase does)
 
 1. **Passive subdomain enumeration** (parallel, capped by `-j`) — merged,
