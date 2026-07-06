@@ -77,8 +77,13 @@ chmod +x recogun.sh
 | `-p` | Passive port discovery (`naabu -passive`) |
 | `-o` | Origin IP discovery behind WAF/CDN |
 | `-j <n>` | Max concurrent tool jobs (default 8) |
+| `-v` | Verbose — log the actual command run per tool (API keys redacted) |
 | `-c` | Report available tools/keys, then exit |
 | `-h` | Usage |
+
+Every run prints a config summary (target, which optional phases are on,
+scope files, parallel jobs) before scanning starts — so you always know
+exactly what a given invocation is about to do without re-reading flags.
 
 ## Scope files (`-x` / `-i`)
 

@@ -32,6 +32,7 @@ TOOLS_TO_EXCLUDE=()
 BRUTEFORCE=false
 PORT_DISCOVERY=false
 ORIGIN_IP_DISCOVERY=false
+VERBOSE=false
 RESOLVERS_FILE="${RESOLVERS_FILE:-resolvers.txt}"
 WORDLISTS_DIR="${WORDLISTS_DIR:-wordlists}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-300}"
@@ -67,6 +68,20 @@ count_unique_results() {
     fi
 }
 
+# Mask configured API key values in a command string before it's ever
+# logged/printed - several tool invocations embed keys directly
+# (chaos -key $CHAOS_API_KEY, github-subdomains -t $GITHUB_TOKEN, etc.) and
+# recogun.log/-v output must never become a second place those keys live.
+redact_command() {
+    local cmd="$1"
+    for key_var in CHAOS_API_KEY SHODAN_API_KEY CENSYS_API_KEY VIRUSTOTAL_API_KEY \
+                   GITHUB_TOKEN GITLAB_TOKEN; do
+        local val="${!key_var}"
+        [[ -n "$val" ]] && cmd="${cmd//$val/***REDACTED***}"
+    done
+    echo "$cmd"
+}
+
 # Run a tool, capture its output, log the result. Errors go to a file
 # (not an in-memory array) so this stays safe to call from parallel
 # subshells. Never lets one bad tool kill the run.
@@ -77,6 +92,7 @@ run_tool() {
     local tool_timeout="${4:-$TIMEOUT_SECONDS}"
 
     log_message "[+] Running $tool_name..." "$BLUE"
+    $VERBOSE && log_message "    -> $(redact_command "$command")" "$CYAN"
     if timeout "$tool_timeout" bash -c "$command" > "$output_file" 2>> "$CURRENT_LOG"; then
         if [ -s "$output_file" ]; then
             local count
@@ -863,9 +879,13 @@ show_usage() {
     echo "  $0 -d <domain> -p           # Include passive port discovery (naabu -passive)"
     echo "  $0 -d <domain> -o           # Include origin IP discovery (behind WAF/CDN)"
     echo "  $0 -d <domain> -j <n>       # Max parallel tool jobs (default: 8)"
+    echo "  $0 -d <domain> -v           # Verbose - log the actual command run per tool (keys redacted)"
     echo "  $0 -c                       # Check which dependencies/API keys are available, then exit"
     echo ""
     echo -e "${GREEN}Notes:${RESET}"
+    echo "  - Every run prints a config summary (target, active flags, scope,"
+    echo "    parallel jobs) before scanning starts, so you can see exactly what"
+    echo "    is about to run."
     echo "  - If a previous scan exists for the domain in results/, new subdomains,"
     echo "    active hosts, and URLs are automatically diffed and reported."
     echo "  - Scope files (-x/-i) accept exact subdomains or *.domain.tld wildcards,"
@@ -884,7 +904,7 @@ show_usage() {
     echo "  $0 -l domains.txt -j 16"
 }
 
-while getopts "d:l:x:i:t:e:j:bpoch" opt; do
+while getopts "d:l:x:i:t:e:j:bpocvh" opt; do
     case "$opt" in
         d) DOMAIN="$OPTARG" ;;
         l) DOMAINS_FILE="$OPTARG" ;;
@@ -896,6 +916,7 @@ while getopts "d:l:x:i:t:e:j:bpoch" opt; do
         b) BRUTEFORCE=true ;;
         p) PORT_DISCOVERY=true ;;
         o) ORIGIN_IP_DISCOVERY=true ;;
+        v) VERBOSE=true ;;
         c) check_dependencies; exit 0 ;;
         h) show_usage; exit 0 ;;
         *) show_usage; exit 1 ;;
@@ -927,10 +948,25 @@ mkdir -p "$OUTPUT_DIR"
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v4.3                |"
+echo "  |              RecoGun v4.4                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  +=========================================+"
 echo -e "${RESET}"
+
+# Show exactly what this run will actually do before it starts - which
+# optional phases are on, what scope/tuning is in effect. -v additionally
+# logs the real (secret-redacted) command line for every tool as it runs.
+echo -e "${CYAN}Target:${RESET}            ${DOMAIN:-$DOMAINS_FILE}"
+echo -e "${CYAN}Bruteforce (-b):${RESET}   $BRUTEFORCE"
+echo -e "${CYAN}Port scan (-p):${RESET}    $PORT_DISCOVERY"
+echo -e "${CYAN}Origin IP (-o):${RESET}    $ORIGIN_IP_DISCOVERY"
+echo -e "${CYAN}Include scope:${RESET}     ${INCLUDE_FILE:-none}"
+echo -e "${CYAN}Exclude scope:${RESET}     ${OOS_FILE:-none}"
+[ ${#TOOLS_TO_RUN[@]} -gt 0 ] && echo -e "${CYAN}Only tools:${RESET}        ${TOOLS_TO_RUN[*]}"
+[ ${#TOOLS_TO_EXCLUDE[@]} -gt 0 ] && echo -e "${CYAN}Excluded tools:${RESET}    ${TOOLS_TO_EXCLUDE[*]}"
+echo -e "${CYAN}Parallel jobs:${RESET}     $PARALLEL_JOBS"
+echo -e "${CYAN}Verbose (-v):${RESET}      $VERBOSE"
+echo ""
 
 if [[ -n "$DOMAIN" ]]; then
     process_domain "$DOMAIN"
