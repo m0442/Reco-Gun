@@ -122,6 +122,20 @@ CRAWL_TIMEOUT_SECONDS=3600   # default is 1800 (30 min)
 This is separate from `TIMEOUT_SECONDS`, which stays short (default 300s)
 for the quick API-based passive-enum sources.
 
+## Troubleshooting: `-b` takes 24h on one domain, httpx never finishes
+
+This is wildcard DNS, not a performance bug. If `*.domain.tld` resolves to
+*something* for any subdomain you query, every single wordlist/permutation
+guess in the bruteforce phase "succeeds" as a false positive — the candidate
+list explodes to the size of your wordlist, and `httpx` then has to probe
+all of it one by one. RecoGun checks for this automatically before running
+`-b`: two random, near-certainly-nonexistent subdomains are resolved, and if
+both answer, the whole permutation/bruteforce phase is skipped for that
+domain with a loud warning instead of silently producing garbage. `httpx`
+itself also runs with explicit concurrency (`HTTPX_THREADS`, default 100)
+and a 5s per-host timeout, and logs a warning if more than 20,000
+subdomains get queued for probing regardless of cause.
+
 ## Methodology (what each phase does)
 
 1. **Passive subdomain enumeration** (parallel, capped by `-j`) — merged,

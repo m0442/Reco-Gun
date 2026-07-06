@@ -37,6 +37,7 @@ WORDLISTS_DIR="${WORDLISTS_DIR:-wordlists}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-300}"
 CRAWL_TIMEOUT_SECONDS="${CRAWL_TIMEOUT_SECONDS:-1800}"
 PARALLEL_JOBS="${PARALLEL_JOBS:-8}"
+HTTPX_THREADS="${HTTPX_THREADS:-100}"
 ACTIVE_SUBDOMAINS=""
 CURRENT_LOG=""
 CURRENT_ERRORS=""
@@ -184,6 +185,21 @@ diff_against_previous() {
         comm -13 <(sort -u "$prev_file") <(sort -u "$curr_file") > "$out_file"
         log_message "[i] New $label since last scan: $(count_unique_results "$out_file")" "$CYAN"
     fi
+}
+
+# Detect wildcard DNS: if two random, near-certainly-nonexistent subdomains
+# both resolve, every bruteforce/permutation guess would "succeed" as a false
+# positive and explode the candidate list (then httpx has to probe all of
+# it). Bruteforce/permutation is pointless and actively harmful here.
+has_wildcard_dns() {
+    local domain="$1"
+    if ! command -v dig &>/dev/null; then
+        return 1
+    fi
+    local test1 test2
+    test1=$(dig +short "rg-wc-check-${RANDOM}${RANDOM}.${domain}" A 2>/dev/null)
+    test2=$(dig +short "rg-wc-check-${RANDOM}${RANDOM}.${domain}" A 2>/dev/null)
+    [[ -n "$test1" && -n "$test2" ]]
 }
 
 # Filter resolvers.txt down to resolvers that actually answer a query,
@@ -491,7 +507,9 @@ process_domain() {
     fi
 
     # ---- Phase 2: permutation + bruteforce (opt-in, -b) ----
-    if $BRUTEFORCE; then
+    if $BRUTEFORCE && has_wildcard_dns "$domain"; then
+        log_message "[!] Wildcard DNS detected on $domain - every bruteforce/permutation guess would resolve as a false positive (this is what causes 100k+ fake 'subdomains' and multi-hour httpx runs). Skipping bruteforce/permutation entirely for this domain." "$RED"
+    elif $BRUTEFORCE; then
         local resolvers_valid="$RESOLVERS_FILE"
         if [ -f "$RESOLVERS_FILE" ]; then
             resolvers_valid="$domain_output_dir/bruteforce/resolvers_valid.txt"
@@ -543,9 +561,14 @@ process_domain() {
 
     # ---- Phase 3: HTTP probing ----
     if [ -s "$final_output" ]; then
+        local sub_count
+        sub_count=$(count_unique_results "$final_output")
+        if [ "$sub_count" -gt 20000 ]; then
+            log_message "[!] $sub_count subdomains queued for HTTP probing - this is a lot and may take a long time. If this number looks implausibly high, check for wildcard DNS or narrow scope with -x/-i." "$YELLOW"
+        fi
         log_message "[*] Running httpx..." "$BLUE"
         if command -v httpx &>/dev/null; then
-            httpx -l "$final_output" -silent -o "$ACTIVE_SUBDOMAINS" 2>> "$CURRENT_LOG"
+            httpx -l "$final_output" -silent -threads "$HTTPX_THREADS" -timeout 5 -o "$ACTIVE_SUBDOMAINS" 2>> "$CURRENT_LOG"
             if [ -s "$ACTIVE_SUBDOMAINS" ]; then
                 log_message "[+] Found $(count_unique_results "$ACTIVE_SUBDOMAINS") active subdomains" "$GREEN"
             else
@@ -904,7 +927,7 @@ mkdir -p "$OUTPUT_DIR"
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v4.2                |"
+echo "  |              RecoGun v4.3                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  +=========================================+"
 echo -e "${RESET}"
