@@ -79,7 +79,15 @@ chmod +x recogun.sh
 | `-j <n>` | Max concurrent tool jobs (default 8) |
 | `-v` | Verbose — log the actual command run per tool (API keys redacted) |
 | `-c` | Report available tools/keys, then exit |
+| `-u` | Check for a newer RecoGun version now, then exit |
 | `-h` | Usage |
+
+Every run also auto-checks for updates (`git fetch`, 10s timeout) before
+scanning. In a real terminal, it asks `[y/N]` before pulling; in a
+non-interactive session (cron, CI) it never prompts — it just logs that an
+update exists and continues with the current version, so automated runs
+can never hang waiting on stdin that will never arrive. `git pull` on
+"yes" then exits rather than trying to hot-swap the running script.
 
 Every run prints a config summary (target, which optional phases are on,
 scope files, parallel jobs) before scanning starts — so you always know

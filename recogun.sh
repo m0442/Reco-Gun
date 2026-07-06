@@ -865,6 +865,50 @@ check_dependencies() {
     echo "    config.env - configure it separately if you use -o."
 }
 
+# Check origin/main for new commits. Interactive (-t 0, i.e. a real terminal)
+# gets a y/n prompt; anything else (cron, piped, CI) skips the prompt
+# entirely so an automated run never hangs waiting for input on stdin that
+# will never arrive. Silent no-op if this isn't a git checkout or the
+# network/fetch fails - update checking must never block a scan.
+check_for_updates() {
+    local explicit="${1:-false}"
+
+    if [ ! -d "$SCRIPT_DIR/.git" ]; then
+        $explicit && log_message "[!] Not a git checkout - can't check for updates." "$YELLOW"
+        return
+    fi
+
+    local local_hash remote_hash behind_count
+    local_hash=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null)
+    if ! timeout 10 git -C "$SCRIPT_DIR" fetch --quiet origin main 2>/dev/null; then
+        $explicit && log_message "[!] Could not reach origin - skipping update check." "$YELLOW"
+        return
+    fi
+    remote_hash=$(git -C "$SCRIPT_DIR" rev-parse origin/main 2>/dev/null)
+
+    if [[ -z "$local_hash" || -z "$remote_hash" || "$local_hash" == "$remote_hash" ]]; then
+        $explicit && log_message "[OK] Already up to date." "$GREEN"
+        return
+    fi
+
+    behind_count=$(git -C "$SCRIPT_DIR" rev-list --count "HEAD..origin/main" 2>/dev/null)
+    log_message "[i] Update available: $behind_count new commit(s) on origin/main" "$YELLOW"
+
+    if [ -t 0 ]; then
+        read -r -p "Update now? [y/N] " answer
+        if [[ "$answer" =~ ^[Yy]$ ]]; then
+            if git -C "$SCRIPT_DIR" pull --ff-only origin main; then
+                log_message "[OK] Updated. Re-run your command to use the new version." "$GREEN"
+            else
+                log_message "[!] Update failed (local changes or diverged history?) - continuing with current version." "$RED"
+            fi
+            exit 0
+        fi
+    else
+        log_message "[i] Non-interactive session - skipping update prompt. Run with -u to update manually." "$YELLOW"
+    fi
+}
+
 show_usage() {
     echo -e "${BLUE}RecoGun - Automated Subdomain Enumeration and Reconnaissance${RESET}"
     echo ""
@@ -881,8 +925,13 @@ show_usage() {
     echo "  $0 -d <domain> -j <n>       # Max parallel tool jobs (default: 8)"
     echo "  $0 -d <domain> -v           # Verbose - log the actual command run per tool (keys redacted)"
     echo "  $0 -c                       # Check which dependencies/API keys are available, then exit"
+    echo "  $0 -u                       # Check for a newer RecoGun version now, then exit"
     echo ""
     echo -e "${GREEN}Notes:${RESET}"
+    echo "  - Every normal run also auto-checks for updates (git fetch, ~10s max"
+    echo "    timeout). In a real terminal it asks [y/N] before pulling; in a"
+    echo "    non-interactive session (cron etc.) it never prompts - it just logs"
+    echo "    that one's available and continues with the current version."
     echo "  - Every run prints a config summary (target, active flags, scope,"
     echo "    parallel jobs) before scanning starts, so you can see exactly what"
     echo "    is about to run."
@@ -904,7 +953,7 @@ show_usage() {
     echo "  $0 -l domains.txt -j 16"
 }
 
-while getopts "d:l:x:i:t:e:j:bpocvh" opt; do
+while getopts "d:l:x:i:t:e:j:bpocuvh" opt; do
     case "$opt" in
         d) DOMAIN="$OPTARG" ;;
         l) DOMAINS_FILE="$OPTARG" ;;
@@ -918,10 +967,16 @@ while getopts "d:l:x:i:t:e:j:bpocvh" opt; do
         o) ORIGIN_IP_DISCOVERY=true ;;
         v) VERBOSE=true ;;
         c) check_dependencies; exit 0 ;;
+        u) check_for_updates true; exit 0 ;;
         h) show_usage; exit 0 ;;
         *) show_usage; exit 1 ;;
     esac
 done
+
+# Automatic check on every normal run - self-skips if this isn't a git
+# checkout, the network is unreachable, or stdin isn't a real terminal
+# (cron etc.), so it can never block or hang an automated invocation.
+check_for_updates
 
 if [[ -z "$DOMAIN" && -z "$DOMAINS_FILE" ]]; then
     echo -e "${RED}Error: You must specify either a domain (-d) or a domains file (-l)${RESET}"
@@ -948,7 +1003,7 @@ mkdir -p "$OUTPUT_DIR"
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v4.4                |"
+echo "  |              RecoGun v4.5                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  +=========================================+"
 echo -e "${RESET}"
