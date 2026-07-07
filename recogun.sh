@@ -33,8 +33,9 @@ BRUTEFORCE=false
 PORT_DISCOVERY=false
 ORIGIN_IP_DISCOVERY=false
 VERBOSE=false
-RESOLVERS_FILE="${RESOLVERS_FILE:-resolvers.txt}"
-WORDLISTS_DIR="${WORDLISTS_DIR:-wordlists}"
+RESOLVERS_FILE="${RESOLVERS_FILE:-$SCRIPT_DIR/resolvers.txt}"
+WORDLISTS_DIR="${WORDLISTS_DIR:-$SCRIPT_DIR/wordlists}"
+WORDLIST_FILE="${WORDLIST_FILE:-$WORDLISTS_DIR/subdomains.txt}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-300}"
 CRAWL_TIMEOUT_SECONDS="${CRAWL_TIMEOUT_SECONDS:-1800}"
 PARALLEL_JOBS="${PARALLEL_JOBS:-8}"
@@ -562,10 +563,14 @@ process_domain() {
         fi
 
         local WORDLIST_TOOLS=()
-        if [ -s "$resolvers_valid" ] && [ -s "$WORDLISTS_DIR/subdomains.txt" ] && command -v puredns &>/dev/null; then
-            WORDLIST_TOOLS+=("puredns:puredns bruteforce $WORDLISTS_DIR/subdomains.txt $domain --resolvers $resolvers_valid -q")
+        if ! command -v puredns &>/dev/null; then
+            log_message "[!] puredns not installed - skipping wordlist bruteforce" "$YELLOW"
+        elif [ ! -s "$resolvers_valid" ]; then
+            log_message "[!] No validated resolvers - skipping wordlist bruteforce" "$YELLOW"
+        elif [ ! -s "$WORDLIST_FILE" ]; then
+            log_message "[!] Wordlist file ($WORDLIST_FILE) empty or missing - skipping wordlist bruteforce" "$YELLOW"
         else
-            log_message "[!] Validated resolvers or wordlists/subdomains.txt not found - skipping wordlist bruteforce" "$YELLOW"
+            WORDLIST_TOOLS+=("puredns:puredns bruteforce $WORDLIST_FILE $domain --resolvers $resolvers_valid -q")
         fi
         command -v dnsrecon &>/dev/null && WORDLIST_TOOLS+=("dnsrecon:dnsrecon -d $domain")
         if [ ${#WORDLIST_TOOLS[@]} -gt 0 ]; then
@@ -930,6 +935,8 @@ show_usage() {
     echo "  $0 -d <domain> -x <oos.txt> # Exclude out-of-scope subdomains/patterns"
     echo "  $0 -d <domain> -i <in.txt>  # Restrict to an include-only subdomain scope"
     echo "  $0 -d <domain> -b           # Include DNS permutation + wordlist bruteforce"
+    echo "  $0 -d <domain> -b -w <file> # Bruteforce with a custom wordlist (default: bundled wordlists/subdomains.txt)"
+    echo "  $0 -d <domain> -b -r <file> # Bruteforce with a custom resolvers list (default: bundled resolvers.txt)"
     echo "  $0 -d <domain> -p           # Include passive port discovery (naabu -passive)"
     echo "  $0 -d <domain> -o           # Include origin IP discovery (behind WAF/CDN)"
     echo "  $0 -d <domain> -j <n>       # Max parallel tool jobs (default: 8)"
@@ -949,6 +956,9 @@ show_usage() {
     echo "    active hosts, and URLs are automatically diffed and reported."
     echo "  - Scope files (-x/-i) accept exact subdomains or *.domain.tld wildcards,"
     echo "    one per line, # for comments."
+    echo "  - -b works out of the box with no setup: a default wordlist"
+    echo "    (SecLists subdomains-top1million-5000) and default resolvers"
+    echo "    list ship in the repo. Pass -w/-r to use your own instead."
     echo "  - Origin IP discovery (-o) gathers candidates from VirusTotal, AlienVault,"
     echo "    URLScan, Shodan cert search, uncover and favicon hashing, then confirms"
     echo "    them with a direct GET (Host header spoofed) - no exploitation, just"
@@ -963,7 +973,7 @@ show_usage() {
     echo "  $0 -l domains.txt -j 16"
 }
 
-while getopts "d:l:x:i:t:e:j:bpocuvh" opt; do
+while getopts "d:l:x:i:t:e:j:w:r:bpocuvh" opt; do
     case "$opt" in
         d) DOMAIN="$OPTARG" ;;
         l) DOMAINS_FILE="$OPTARG" ;;
@@ -972,6 +982,8 @@ while getopts "d:l:x:i:t:e:j:bpocuvh" opt; do
         t) IFS=',' read -ra TOOLS_TO_RUN <<< "$(echo "$OPTARG" | tr -d ' ')" ;;
         e) IFS=',' read -ra TOOLS_TO_EXCLUDE <<< "$(echo "$OPTARG" | tr -d ' ')" ;;
         j) PARALLEL_JOBS="$OPTARG" ;;
+        w) WORDLIST_FILE="$OPTARG" ;;
+        r) RESOLVERS_FILE="$OPTARG" ;;
         b) BRUTEFORCE=true ;;
         p) PORT_DISCOVERY=true ;;
         o) ORIGIN_IP_DISCOVERY=true ;;
@@ -982,6 +994,7 @@ while getopts "d:l:x:i:t:e:j:bpocuvh" opt; do
         *) show_usage; exit 1 ;;
     esac
 done
+
 
 # Automatic check on every normal run - self-skips if this isn't a git
 # checkout, the network is unreachable, or stdin isn't a real terminal
@@ -1009,11 +1022,23 @@ if [[ -n "$INCLUDE_FILE" && ! -f "$INCLUDE_FILE" ]]; then
     exit 1
 fi
 
+# Only matter when -b is actually used - a bundled default wordlist/resolvers
+# file ships in the repo, but -w/-r let you point at something else entirely.
+if $BRUTEFORCE && [ ! -f "$WORDLIST_FILE" ]; then
+    echo -e "${RED}Error: Wordlist file '$WORDLIST_FILE' not found${RESET}"
+    exit 1
+fi
+
+if $BRUTEFORCE && [ ! -f "$RESOLVERS_FILE" ]; then
+    echo -e "${RED}Error: Resolvers file '$RESOLVERS_FILE' not found${RESET}"
+    exit 1
+fi
+
 mkdir -p "$OUTPUT_DIR"
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v4.6                |"
+echo "  |              RecoGun v4.7                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  +=========================================+"
 echo -e "${RESET}"

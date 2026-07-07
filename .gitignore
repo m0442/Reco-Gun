@@ -5,5 +5,6 @@ config.env
 results/
 *.log
 
-# Local wordlists/resolvers you may drop in per-machine
-resolvers.txt
+# resolvers.txt and wordlists/subdomains.txt are bundled defaults - tracked
+# on purpose so -b works out of the box. Custom overrides passed via -w/-r
+# don't need to live in this repo at all, so nothing to ignore here.

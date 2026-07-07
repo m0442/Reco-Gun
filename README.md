@@ -61,7 +61,16 @@ cp config.env.example config.env   # fill in whichever API keys you have
 chmod +x recogun.sh
 ./recogun.sh -c                    # see what's actually available
 ./recogun.sh -d target.com
+./recogun.sh -d target.com -b      # bruteforce works immediately - no separate wordlist/resolvers setup needed
 ```
+
+`resolvers.txt` (21 major public resolvers) and `wordlists/subdomains.txt`
+(SecLists' `subdomains-top1million-5000`, 5,000 entries) ship in the repo,
+so `-b` is usable straight after cloning — no extra downloads. They're
+resolved relative to the script's own location, not your current
+directory, so this works no matter where you run RecoGun from. For a bigger
+wordlist or a fresher resolver list, pass `-w`/`-r` with your own file;
+nothing needs to change in the repo to use something else.
 
 ## Flag reference
 
@@ -74,6 +83,8 @@ chmod +x recogun.sh
 | `-x <file>` | Out-of-scope file — drop matching subdomains |
 | `-i <file>` | Include-only file — restrict to matching subdomains |
 | `-b` | DNS permutation (dnsgen/alterx/shuffledns) + wordlist bruteforce (puredns) |
+| `-w <file>` | Custom wordlist for `-b` (default: bundled `wordlists/subdomains.txt`) |
+| `-r <file>` | Custom resolvers for `-b` (default: bundled `resolvers.txt`) |
 | `-p` | Passive port discovery (`naabu -passive`) |
 | `-o` | Origin IP discovery behind WAF/CDN |
 | `-j <n>` | Max concurrent tool jobs (default 8) |
