@@ -34,6 +34,7 @@ TOOLS_TO_EXCLUDE=()
 BRUTEFORCE=false
 PORT_DISCOVERY=false
 ORIGIN_IP_DISCOVERY=false
+SKIP_CRAWLING=false
 VERBOSE=false
 PERMUTATION_WORDLIST_CUSTOM=false
 RESOLVERS_FILE="${RESOLVERS_FILE:-$SCRIPT_DIR/resolvers.txt}"
@@ -137,6 +138,28 @@ merge_results() {
     local dir="$1"
     local dest="$2"
     cat "$dir"/*.txt 2>/dev/null | sed '/^\s*$/d' | sort -u > "$dest"
+}
+
+# Apply -t/-e (TOOLS_TO_RUN/TOOLS_TO_EXCLUDE) to any "name:command" array -
+# shared by passive-enum and crawling, so excluding a tool by name works the
+# same way regardless of which phase it belongs to.
+filter_tools_by_flags() {
+    local -n src_ref="$1"
+    local -n dest_ref="$2"
+
+    for tool in "${src_ref[@]}"; do
+        local tool_name="${tool%%:*}"
+        tool_name=$(echo "$tool_name" | xargs)
+
+        if [[ ${#TOOLS_TO_RUN[@]} -gt 0 && ! " ${TOOLS_TO_RUN[*]} " =~ " ${tool_name} " ]]; then
+            continue
+        fi
+        if [[ " ${TOOLS_TO_EXCLUDE[*]} " =~ " ${tool_name} " ]]; then
+            log_message "[i] Excluding tool: $tool_name" "$YELLOW"
+            continue
+        fi
+        dest_ref+=("$tool")
+    done
 }
 
 # Convert a scope file (exact entries or *.domain wildcards) into a regex
@@ -472,19 +495,7 @@ process_domain() {
     command -v haktrails &>/dev/null && TOOLS+=("haktrails:echo \"$domain\" | haktrails subdomains")
 
     local FILTERED_TOOLS=()
-    for tool in "${TOOLS[@]}"; do
-        local tool_name="${tool%%:*}"
-        tool_name=$(echo "$tool_name" | xargs)
-
-        if [[ ${#TOOLS_TO_RUN[@]} -gt 0 && ! " ${TOOLS_TO_RUN[*]} " =~ " ${tool_name} " ]]; then
-            continue
-        fi
-        if [[ " ${TOOLS_TO_EXCLUDE[*]} " =~ " ${tool_name} " ]]; then
-            log_message "[i] Excluding tool: $tool_name" "$YELLOW"
-            continue
-        fi
-        FILTERED_TOOLS+=("$tool")
-    done
+    filter_tools_by_flags TOOLS FILTERED_TOOLS
 
     log_message "[*] Running ${#FILTERED_TOOLS[@]} passive sources (up to $PARALLEL_JOBS in parallel)..." "$BLUE"
     run_tools_parallel FILTERED_TOOLS "$domain_output_dir/sources"
@@ -660,18 +671,23 @@ process_domain() {
         fi
     fi
 
-    # ---- Phase 6: crawling (parallel) ----
-    if [ -s "$ACTIVE_SUBDOMAINS" ]; then
+    # ---- Phase 6: crawling (parallel, skip entirely with -C) ----
+    if $SKIP_CRAWLING; then
+        log_message "[i] Skipping crawling phase (-C)" "$YELLOW"
+    elif [ -s "$ACTIVE_SUBDOMAINS" ]; then
         log_message "[*] Running crawling tools..." "$BLUE"
 
         # These process every active subdomain (can be hundreds), so they need
         # real internal concurrency, not just the outer parallel-tools job
         # pool - and a much longer timeout than quick API-based sources get.
+        local CRAWL_TOOLS_ALL=()
+        command -v waymore &>/dev/null && CRAWL_TOOLS_ALL+=("waymore:waymore -i $domain -mode U -oU /dev/stdout")
+        command -v waybackurls &>/dev/null && CRAWL_TOOLS_ALL+=("waybackurls:cat $ACTIVE_SUBDOMAINS | xargs -P $PARALLEL_JOBS -I{} sh -c 'echo {} | waybackurls' 2>/dev/null")
+        command -v gau &>/dev/null && CRAWL_TOOLS_ALL+=("gau-crawl:cat $ACTIVE_SUBDOMAINS | gau --threads $PARALLEL_JOBS")
+        command -v katana &>/dev/null && CRAWL_TOOLS_ALL+=("katana:katana -d 3 -jc -aff -fx -list $ACTIVE_SUBDOMAINS -c $PARALLEL_JOBS -silent")
+
         local CRAWL_TOOLS=()
-        command -v waymore &>/dev/null && CRAWL_TOOLS+=("waymore:waymore -i $domain -mode U -oU /dev/stdout")
-        command -v waybackurls &>/dev/null && CRAWL_TOOLS+=("waybackurls:cat $ACTIVE_SUBDOMAINS | xargs -P $PARALLEL_JOBS -I{} sh -c 'echo {} | waybackurls' 2>/dev/null")
-        command -v gau &>/dev/null && CRAWL_TOOLS+=("gau-crawl:cat $ACTIVE_SUBDOMAINS | gau --threads $PARALLEL_JOBS")
-        command -v katana &>/dev/null && CRAWL_TOOLS+=("katana:katana -d 3 -jc -aff -fx -list $ACTIVE_SUBDOMAINS -c $PARALLEL_JOBS -silent")
+        filter_tools_by_flags CRAWL_TOOLS_ALL CRAWL_TOOLS
 
         if [ ${#CRAWL_TOOLS[@]} -gt 0 ]; then
             run_tools_parallel CRAWL_TOOLS "$domain_output_dir/crawling" "$CRAWL_TIMEOUT_SECONDS"
@@ -951,8 +967,9 @@ show_usage() {
     echo -e "${GREEN}Usage:${RESET}"
     echo "  $0 -d <domain>              # Scan single domain"
     echo "  $0 -l <domains_file>        # Scan multiple domains from file"
-    echo "  $0 -d <domain> -t <tools>   # Run specific tools only (comma separated)"
-    echo "  $0 -d <domain> -e <tools>   # Exclude specific tools (comma separated)"
+    echo "  $0 -d <domain> -t <tools>   # Run specific tools only (comma separated) - applies to both passive-enum AND crawling tool names"
+    echo "  $0 -d <domain> -e <tools>   # Exclude specific tools (comma separated) - e.g. -e katana to skip just katana"
+    echo "  $0 -d <domain> -C           # Skip the entire crawling phase (waymore/waybackurls/gau-crawl/katana)"
     echo "  $0 -d <domain> -x <oos.txt> # Exclude out-of-scope subdomains/patterns"
     echo "  $0 -d <domain> -i <in.txt>  # Restrict to an include-only subdomain scope"
     echo "  $0 -d <domain> -b           # Include DNS permutation + wordlist bruteforce"
@@ -999,7 +1016,7 @@ show_usage() {
     echo "  $0 -l domains.txt -j 16"
 }
 
-while getopts "d:l:x:i:t:e:j:w:r:m:bpocuvh" opt; do
+while getopts "d:l:x:i:t:e:j:w:r:m:bpocCuvh" opt; do
     case "$opt" in
         d) DOMAIN="$OPTARG" ;;
         l) DOMAINS_FILE="$OPTARG" ;;
@@ -1014,6 +1031,7 @@ while getopts "d:l:x:i:t:e:j:w:r:m:bpocuvh" opt; do
         b) BRUTEFORCE=true ;;
         p) PORT_DISCOVERY=true ;;
         o) ORIGIN_IP_DISCOVERY=true ;;
+        C) SKIP_CRAWLING=true ;;
         v) VERBOSE=true ;;
         c) check_dependencies; exit 0 ;;
         u) check_for_updates true; exit 0 ;;
@@ -1070,7 +1088,7 @@ mkdir -p "$OUTPUT_DIR"
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v4.8                |"
+echo "  |              RecoGun v4.9                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  |                 by $OPERATOR                 |"
 echo "  +=========================================+"
@@ -1084,6 +1102,7 @@ echo -e "${CYAN}Target:${RESET}            ${DOMAIN:-$DOMAINS_FILE}"
 echo -e "${CYAN}Bruteforce (-b):${RESET}   $BRUTEFORCE"
 echo -e "${CYAN}Port scan (-p):${RESET}    $PORT_DISCOVERY"
 echo -e "${CYAN}Origin IP (-o):${RESET}    $ORIGIN_IP_DISCOVERY"
+echo -e "${CYAN}Crawling skipped (-C):${RESET} $SKIP_CRAWLING"
 echo -e "${CYAN}Include scope:${RESET}     ${INCLUDE_FILE:-none}"
 echo -e "${CYAN}Exclude scope:${RESET}     ${OOS_FILE:-none}"
 [ ${#TOOLS_TO_RUN[@]} -gt 0 ] && echo -e "${CYAN}Only tools:${RESET}        ${TOOLS_TO_RUN[*]}"
