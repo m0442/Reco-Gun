@@ -43,6 +43,7 @@ ACTIVE_SUBDOMAINS=""
 CURRENT_LOG=""
 CURRENT_ERRORS=""
 PREV_DIR=""
+LAST_DOMAIN_OUTPUT_DIR=""
 
 # Colors
 GREEN='\033[32m'
@@ -408,9 +409,15 @@ verify_origin_candidates() {
 
 process_domain() {
     local domain="$1"
+    local list_index="${2:-}"
+    local list_total="${3:-}"
+    local progress_tag=""
+    [[ -n "$list_index" ]] && progress_tag="[$list_index/$list_total] "
+
     local timestamp
     timestamp=$(date '+%Y%m%d_%H%M%S')
     local domain_output_dir="$OUTPUT_DIR/${domain}_${timestamp}"
+    LAST_DOMAIN_OUTPUT_DIR="$domain_output_dir"
     mkdir -p "$domain_output_dir/sources" "$domain_output_dir/bruteforce" "$domain_output_dir/crawling"
     local final_output="$domain_output_dir/final_subdomains.txt"
     ACTIVE_SUBDOMAINS="$domain_output_dir/active_subdomains.txt"
@@ -419,7 +426,7 @@ process_domain() {
     > "$CURRENT_LOG"
     > "$CURRENT_ERRORS"
 
-    log_message "[*] Processing domain: $domain" "$PURPLE"
+    log_message "${progress_tag}[*] Processing domain: $domain" "$PURPLE"
 
     PREV_DIR=$(find_previous_run_dir "$domain" "$domain_output_dir")
     if [[ -n "$PREV_DIR" ]]; then
@@ -750,13 +757,16 @@ process_domain() {
     export_json "$domain" "$domain_output_dir" "$final_output"
 
     echo ""
-    log_message "=== SCAN SUMMARY ===" "$CYAN"
-    log_message "Domain: $domain" "$CYAN"
+    log_message "${progress_tag}=== SCAN SUMMARY: $domain ===" "$CYAN"
     log_message "Total Subdomains: $total_subs" "$CYAN"
     log_message "Active Subdomains: $active_subs" "$CYAN"
+    if [ -s "$domain_output_dir/takeovers.txt" ]; then
+        log_message "Takeovers: FOUND - see takeovers.txt" "$RED"
+    fi
     if [ ${#TOOL_ERRORS[@]} -gt 0 ]; then
         log_message "Failed Tools: ${#TOOL_ERRORS[@]}" "$RED"
     fi
+    log_message "${progress_tag}[DONE] $domain" "$GREEN"
     echo ""
 }
 
@@ -1003,7 +1013,7 @@ mkdir -p "$OUTPUT_DIR"
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v4.5                |"
+echo "  |              RecoGun v4.6                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  +=========================================+"
 echo -e "${RESET}"
@@ -1026,12 +1036,32 @@ echo ""
 if [[ -n "$DOMAIN" ]]; then
     process_domain "$DOMAIN"
 elif [[ -n "$DOMAINS_FILE" ]]; then
-    log_message "[*] Processing domains from file: $DOMAINS_FILE" "$BLUE"
+    total_domains=$(grep -cv '^[[:space:]]*\(#\|$\)' "$DOMAINS_FILE")
+    log_message "[*] Processing $total_domains domain(s) from file: $DOMAINS_FILE" "$BLUE"
+    domain_index=0
+    domains_with_takeovers=()
+    domains_with_errors=()
     while IFS= read -r domain || [[ -n "$domain" ]]; do
         [[ -z "$domain" || "$domain" =~ ^[[:space:]]*# ]] && continue
-        process_domain "$(echo "$domain" | xargs)"
+        domain_index=$((domain_index + 1))
+        domain="$(echo "$domain" | xargs)"
+        process_domain "$domain" "$domain_index" "$total_domains"
+        [ -s "$LAST_DOMAIN_OUTPUT_DIR/takeovers.txt" ] && domains_with_takeovers+=("$domain")
+        [ -s "$LAST_DOMAIN_OUTPUT_DIR/.tool_errors" ] && domains_with_errors+=("$domain")
         echo ""
     done < "$DOMAINS_FILE"
+
+    echo -e "${GREEN}"
+    echo "  +=========================================+"
+    echo "  |   ALL $total_domains DOMAIN(S) COMPLETE"
+    echo "  +=========================================+"
+    echo -e "${RESET}"
+    if [ ${#domains_with_takeovers[@]} -gt 0 ]; then
+        log_message "Takeovers found on: ${domains_with_takeovers[*]}" "$RED"
+    fi
+    if [ ${#domains_with_errors[@]} -gt 0 ]; then
+        log_message "Domains with tool errors: ${domains_with_errors[*]}" "$YELLOW"
+    fi
 fi
 
 log_message "[OK] RecoGun scan completed!" "$GREEN"

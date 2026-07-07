@@ -118,6 +118,27 @@ just re-run the same domain periodically, e.g. from cron:
 0 */6 * * * cd /path/to/RecoGun && ./recogun.sh -d target.com >> cron.log 2>&1
 ```
 
+## Multi-domain progress (`-l`)
+
+Each domain in the list gets a `[N/Total]` prefix on its start/summary/done
+lines, so a long list running unattended shows exactly where it is:
+
+```
+[3/10] [*] Processing domain: example.com
+[3/10] === SCAN SUMMARY: example.com ===
+[3/10] [DONE] example.com
+```
+
+After the whole list finishes, a final banner reports which domains (if
+any) had takeovers or tool errors, across the entire run:
+
+```
+  +=========================================+
+  |   ALL 10 DOMAIN(S) COMPLETE
+  +=========================================+
+Takeovers found on: example.com internal.example.com
+```
+
 ## Troubleshooting: crawling tools erroring out on large targets
 
 If `waybackurls`/`gau-crawl`/`katana` show `[X] Error ... Skipping to the next
