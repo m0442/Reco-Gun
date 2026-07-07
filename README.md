@@ -64,13 +64,23 @@ chmod +x recogun.sh
 ./recogun.sh -d target.com -b      # bruteforce works immediately - no separate wordlist/resolvers setup needed
 ```
 
-`resolvers.txt` (21 major public resolvers) and `wordlists/subdomains.txt`
-(SecLists' `subdomains-top1million-5000`, 5,000 entries) ship in the repo,
-so `-b` is usable straight after cloning — no extra downloads. They're
-resolved relative to the script's own location, not your current
-directory, so this works no matter where you run RecoGun from. For a bigger
-wordlist or a fresher resolver list, pass `-w`/`-r` with your own file;
-nothing needs to change in the repo to use something else.
+Three files ship in the repo so `-b` is usable straight after cloning, with
+no extra downloads:
+
+- `resolvers.txt` — 21 major public resolvers
+- `wordlists/subdomains.txt` — SecLists' `subdomains-top1million-5000` (5,000 entries), used by `puredns` for wordlist bruteforce
+- `wordlists/permutations.txt` — [six2dez/OneListForAll](https://github.com/six2dez/OneListForAll)'s `permutations_short.txt` (1,069 entries — `dev`, `staging`, `api`, `www1`-`www7`, etc.), used by `dnsgen -w` and (only if you pass `-m`) `alterx -pp word=`
+
+All three resolve relative to the script's own location, not your current
+directory, so this works no matter where you run RecoGun from. Pass
+`-w`/`-r`/`-m` to use your own instead; nothing needs to change in the repo.
+
+Note on `-m`: without it, `alterx` runs with `-en` (enrichment — *adds*
+words pulled from your already-found subdomains on top of its own curated
+list). `alterx`'s built-in word list is purpose-built for its DSL patterns,
+so RecoGun doesn't silently swap it out for a generic wordlist — `-m` only
+takes effect for `alterx` if you explicitly pass it, in which case it
+replaces alterx's `word` payload outright (`-pp word=<file>`).
 
 ## Flag reference
 
@@ -85,6 +95,7 @@ nothing needs to change in the repo to use something else.
 | `-b` | DNS permutation (dnsgen/alterx/shuffledns) + wordlist bruteforce (puredns) |
 | `-w <file>` | Custom wordlist for `-b` (default: bundled `wordlists/subdomains.txt`) |
 | `-r <file>` | Custom resolvers for `-b` (default: bundled `resolvers.txt`) |
+| `-m <file>` | Custom permutation wordlist for `-b` (default: bundled `wordlists/permutations.txt`) |
 | `-p` | Passive port discovery (`naabu -passive`) |
 | `-o` | Origin IP discovery behind WAF/CDN |
 | `-j <n>` | Max concurrent tool jobs (default 8) |

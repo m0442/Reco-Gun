@@ -33,9 +33,11 @@ BRUTEFORCE=false
 PORT_DISCOVERY=false
 ORIGIN_IP_DISCOVERY=false
 VERBOSE=false
+PERMUTATION_WORDLIST_CUSTOM=false
 RESOLVERS_FILE="${RESOLVERS_FILE:-$SCRIPT_DIR/resolvers.txt}"
 WORDLISTS_DIR="${WORDLISTS_DIR:-$SCRIPT_DIR/wordlists}"
 WORDLIST_FILE="${WORDLIST_FILE:-$WORDLISTS_DIR/subdomains.txt}"
+PERMUTATION_WORDLIST="${PERMUTATION_WORDLIST:-$WORDLISTS_DIR/permutations.txt}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-300}"
 CRAWL_TIMEOUT_SECONDS="${CRAWL_TIMEOUT_SECONDS:-1800}"
 PARALLEL_JOBS="${PARALLEL_JOBS:-8}"
@@ -544,8 +546,25 @@ process_domain() {
             log_message "[!] No seed subdomains for permutation - skipping dnsgen/alterx" "$YELLOW"
         else
             local PERM_TOOLS=()
-            command -v dnsgen &>/dev/null && PERM_TOOLS+=("dnsgen:dnsgen $final_output")
-            command -v alterx &>/dev/null && PERM_TOOLS+=("alterx:alterx -l $final_output")
+            if command -v dnsgen &>/dev/null; then
+                if [ -s "$PERMUTATION_WORDLIST" ]; then
+                    PERM_TOOLS+=("dnsgen:dnsgen -w $PERMUTATION_WORDLIST $final_output")
+                else
+                    PERM_TOOLS+=("dnsgen:dnsgen $final_output")
+                fi
+            fi
+            if command -v alterx &>/dev/null; then
+                # -en enriches alterx's own curated word list rather than
+                # replacing it. Only swap the word payload outright
+                # (-pp word=file) if you explicitly passed -m yourself -
+                # alterx's default list is purpose-built for its DSL
+                # patterns and a generic wordlist isn't a clear upgrade.
+                if $PERMUTATION_WORDLIST_CUSTOM && [ -s "$PERMUTATION_WORDLIST" ]; then
+                    PERM_TOOLS+=("alterx:alterx -l $final_output -pp word=$PERMUTATION_WORDLIST")
+                else
+                    PERM_TOOLS+=("alterx:alterx -l $final_output -en")
+                fi
+            fi
             if [ ${#PERM_TOOLS[@]} -gt 0 ]; then
                 run_tools_parallel PERM_TOOLS "$domain_output_dir/bruteforce"
             fi
@@ -937,6 +956,7 @@ show_usage() {
     echo "  $0 -d <domain> -b           # Include DNS permutation + wordlist bruteforce"
     echo "  $0 -d <domain> -b -w <file> # Bruteforce with a custom wordlist (default: bundled wordlists/subdomains.txt)"
     echo "  $0 -d <domain> -b -r <file> # Bruteforce with a custom resolvers list (default: bundled resolvers.txt)"
+    echo "  $0 -d <domain> -b -m <file> # Custom permutation wordlist for dnsgen/alterx (default: bundled wordlists/permutations.txt)"
     echo "  $0 -d <domain> -p           # Include passive port discovery (naabu -passive)"
     echo "  $0 -d <domain> -o           # Include origin IP discovery (behind WAF/CDN)"
     echo "  $0 -d <domain> -j <n>       # Max parallel tool jobs (default: 8)"
@@ -957,8 +977,12 @@ show_usage() {
     echo "  - Scope files (-x/-i) accept exact subdomains or *.domain.tld wildcards,"
     echo "    one per line, # for comments."
     echo "  - -b works out of the box with no setup: a default wordlist"
-    echo "    (SecLists subdomains-top1million-5000) and default resolvers"
-    echo "    list ship in the repo. Pass -w/-r to use your own instead."
+    echo "    (SecLists subdomains-top1million-5000), default resolvers list,"
+    echo "    and default permutation wordlist (OneListForAll permutations)"
+    echo "    all ship in the repo. Pass -w/-r/-m to use your own instead."
+    echo "  - -m only forces alterx to swap its curated word list outright"
+    echo "    (-pp word=file). Without -m, alterx just enriches its own"
+    echo "    list (-en) since that list is purpose-built for its patterns."
     echo "  - Origin IP discovery (-o) gathers candidates from VirusTotal, AlienVault,"
     echo "    URLScan, Shodan cert search, uncover and favicon hashing, then confirms"
     echo "    them with a direct GET (Host header spoofed) - no exploitation, just"
@@ -973,7 +997,7 @@ show_usage() {
     echo "  $0 -l domains.txt -j 16"
 }
 
-while getopts "d:l:x:i:t:e:j:w:r:bpocuvh" opt; do
+while getopts "d:l:x:i:t:e:j:w:r:m:bpocuvh" opt; do
     case "$opt" in
         d) DOMAIN="$OPTARG" ;;
         l) DOMAINS_FILE="$OPTARG" ;;
@@ -984,6 +1008,7 @@ while getopts "d:l:x:i:t:e:j:w:r:bpocuvh" opt; do
         j) PARALLEL_JOBS="$OPTARG" ;;
         w) WORDLIST_FILE="$OPTARG" ;;
         r) RESOLVERS_FILE="$OPTARG" ;;
+        m) PERMUTATION_WORDLIST="$OPTARG"; PERMUTATION_WORDLIST_CUSTOM=true ;;
         b) BRUTEFORCE=true ;;
         p) PORT_DISCOVERY=true ;;
         o) ORIGIN_IP_DISCOVERY=true ;;
@@ -1034,11 +1059,16 @@ if $BRUTEFORCE && [ ! -f "$RESOLVERS_FILE" ]; then
     exit 1
 fi
 
+if $PERMUTATION_WORDLIST_CUSTOM && [ ! -f "$PERMUTATION_WORDLIST" ]; then
+    echo -e "${RED}Error: Permutation wordlist '$PERMUTATION_WORDLIST' not found${RESET}"
+    exit 1
+fi
+
 mkdir -p "$OUTPUT_DIR"
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v4.7                |"
+echo "  |              RecoGun v4.8                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  +=========================================+"
 echo -e "${RESET}"
