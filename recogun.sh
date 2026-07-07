@@ -21,6 +21,8 @@ else
     exit 1
 fi
 
+OPERATOR="${OPERATOR:-m0442}"
+
 # Variables
 DOMAIN=""
 DOMAINS_FILE=""
@@ -1070,12 +1072,14 @@ echo -e "${PURPLE}"
 echo "  +=========================================+"
 echo "  |              RecoGun v4.8                |"
 echo "  |    Automated Reconnaissance Tool         |"
+echo "  |                 by $OPERATOR                 |"
 echo "  +=========================================+"
 echo -e "${RESET}"
 
 # Show exactly what this run will actually do before it starts - which
 # optional phases are on, what scope/tuning is in effect. -v additionally
 # logs the real (secret-redacted) command line for every tool as it runs.
+echo -e "${CYAN}Operator:${RESET}          $OPERATOR"
 echo -e "${CYAN}Target:${RESET}            ${DOMAIN:-$DOMAINS_FILE}"
 echo -e "${CYAN}Bruteforce (-b):${RESET}   $BRUTEFORCE"
 echo -e "${CYAN}Port scan (-p):${RESET}    $PORT_DISCOVERY"
