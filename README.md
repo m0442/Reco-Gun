@@ -92,13 +92,13 @@ chmod +x recogun.sh
 6. **Passive port discovery** (`-p`, opt-in) — `naabu -passive`, no direct
    scanning of the target.
 7. **Takeover check** — subzy against live subdomains.
-8. **Crawling** (parallel, skip entirely with `-C`) — waymore, waybackurls,
-   gau, katana; merged, diffed, deduped with `uro`, split into JS files and
-   API-shaped endpoints. If `paramx` is installed, parameterized URLs are
-   tagged by likely vuln class for triage — classification only, no
-   payloads sent. `-t`/`-e` apply here too (by tool name: `waymore`,
-   `waybackurls`, `gau-crawl`, `katana`), so `-e katana` skips just one
-   crawler without disabling the phase.
+8. **Crawling** (parallel, **opt-in with `-C`** — off by default) — waymore,
+   waybackurls, gau, katana; merged, diffed, deduped with `uro`, split into
+   JS files and API-shaped endpoints. If `paramx` is installed, parameterized
+   URLs are tagged by likely vuln class for triage — classification only, no
+   payloads sent. Once enabled, `-t`/`-e` apply here too (by tool name:
+   `waymore`, `waybackurls`, `gau-crawl`, `katana`), so `-C -e katana` crawls
+   with everything but katana.
 9. **Report** — `report.txt` (human) and `report.json` (machine-readable).
 
 ## Flag reference
@@ -109,7 +109,7 @@ chmod +x recogun.sh
 | `-l <file>` | Scan multiple domains, one per line |
 | `-t <tools>` | Only run these sources (comma separated) — covers passive-enum **and** crawling tool names |
 | `-e <tools>` | Exclude these sources (comma separated) — e.g. `-e katana` skips just katana |
-| `-C` | Skip the entire crawling phase (waymore/waybackurls/gau-crawl/katana) |
+| `-C` | Enable the crawling phase (waymore/waybackurls/gau-crawl/katana) — off by default |
 | `-x <file>` | Out-of-scope file — drop matching subdomains |
 | `-i <file>` | Include-only file — restrict to matching subdomains |
 | `-b` | DNS permutation (dnsgen/alterx/shuffledns) + wordlist bruteforce (puredns) |

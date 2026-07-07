@@ -34,7 +34,7 @@ TOOLS_TO_EXCLUDE=()
 BRUTEFORCE=false
 PORT_DISCOVERY=false
 ORIGIN_IP_DISCOVERY=false
-SKIP_CRAWLING=false
+CRAWLING=false
 VERBOSE=false
 PERMUTATION_WORDLIST_CUSTOM=false
 RESOLVERS_FILE="${RESOLVERS_FILE:-$SCRIPT_DIR/resolvers.txt}"
@@ -671,9 +671,9 @@ process_domain() {
         fi
     fi
 
-    # ---- Phase 6: crawling (parallel, skip entirely with -C) ----
-    if $SKIP_CRAWLING; then
-        log_message "[i] Skipping crawling phase (-C)" "$YELLOW"
+    # ---- Phase 6: crawling (parallel, opt-in with -C) ----
+    if ! $CRAWLING; then
+        log_message "[i] Crawling phase skipped (enable with -C)" "$YELLOW"
     elif [ -s "$ACTIVE_SUBDOMAINS" ]; then
         log_message "[*] Running crawling tools..." "$BLUE"
 
@@ -969,7 +969,7 @@ show_usage() {
     echo "  $0 -l <domains_file>        # Scan multiple domains from file"
     echo "  $0 -d <domain> -t <tools>   # Run specific tools only (comma separated) - applies to both passive-enum AND crawling tool names"
     echo "  $0 -d <domain> -e <tools>   # Exclude specific tools (comma separated) - e.g. -e katana to skip just katana"
-    echo "  $0 -d <domain> -C           # Skip the entire crawling phase (waymore/waybackurls/gau-crawl/katana)"
+    echo "  $0 -d <domain> -C           # Enable the crawling phase (waymore/waybackurls/gau-crawl/katana) - off by default"
     echo "  $0 -d <domain> -x <oos.txt> # Exclude out-of-scope subdomains/patterns"
     echo "  $0 -d <domain> -i <in.txt>  # Restrict to an include-only subdomain scope"
     echo "  $0 -d <domain> -b           # Include DNS permutation + wordlist bruteforce"
@@ -1031,7 +1031,7 @@ while getopts "d:l:x:i:t:e:j:w:r:m:bpocCuvh" opt; do
         b) BRUTEFORCE=true ;;
         p) PORT_DISCOVERY=true ;;
         o) ORIGIN_IP_DISCOVERY=true ;;
-        C) SKIP_CRAWLING=true ;;
+        C) CRAWLING=true ;;
         v) VERBOSE=true ;;
         c) check_dependencies; exit 0 ;;
         u) check_for_updates true; exit 0 ;;
@@ -1088,27 +1088,24 @@ mkdir -p "$OUTPUT_DIR"
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v4.9                |"
+echo "  |              RecoGun v5.0                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  |                 by $OPERATOR                 |"
 echo "  +=========================================+"
 echo -e "${RESET}"
 
-# Show exactly what this run will actually do before it starts - which
-# optional phases are on, what scope/tuning is in effect. -v additionally
-# logs the real (secret-redacted) command line for every tool as it runs.
-echo -e "${CYAN}Operator:${RESET}          $OPERATOR"
-echo -e "${CYAN}Target:${RESET}            ${DOMAIN:-$DOMAINS_FILE}"
-echo -e "${CYAN}Bruteforce (-b):${RESET}   $BRUTEFORCE"
-echo -e "${CYAN}Port scan (-p):${RESET}    $PORT_DISCOVERY"
-echo -e "${CYAN}Origin IP (-o):${RESET}    $ORIGIN_IP_DISCOVERY"
-echo -e "${CYAN}Crawling skipped (-C):${RESET} $SKIP_CRAWLING"
-echo -e "${CYAN}Include scope:${RESET}     ${INCLUDE_FILE:-none}"
-echo -e "${CYAN}Exclude scope:${RESET}     ${OOS_FILE:-none}"
-[ ${#TOOLS_TO_RUN[@]} -gt 0 ] && echo -e "${CYAN}Only tools:${RESET}        ${TOOLS_TO_RUN[*]}"
-[ ${#TOOLS_TO_EXCLUDE[@]} -gt 0 ] && echo -e "${CYAN}Excluded tools:${RESET}    ${TOOLS_TO_EXCLUDE[*]}"
-echo -e "${CYAN}Parallel jobs:${RESET}     $PARALLEL_JOBS"
-echo -e "${CYAN}Verbose (-v):${RESET}      $VERBOSE"
+# Compact one-glance summary: target + only the optional modules that are
+# actually enabled, so you can see what a run will do without parsing a wall
+# of true/false lines. Scope files noted only when set.
+MODULES="passive-enum"
+$BRUTEFORCE && MODULES="$MODULES +bruteforce"
+$PORT_DISCOVERY && MODULES="$MODULES +ports"
+$ORIGIN_IP_DISCOVERY && MODULES="$MODULES +origin-ip"
+$CRAWLING && MODULES="$MODULES +crawling"
+[[ -n "$INCLUDE_FILE" || -n "$OOS_FILE" ]] && MODULES="$MODULES +scope-filter"
+
+echo -e "${CYAN}Target : ${RESET}${DOMAIN:-$DOMAINS_FILE}   ${CYAN}Operator : ${RESET}$OPERATOR"
+echo -e "${CYAN}Modules: ${RESET}$MODULES"
 echo ""
 
 if [[ -n "$DOMAIN" ]]; then
