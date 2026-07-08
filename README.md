@@ -120,7 +120,8 @@ chmod +x recogun.sh
 | `-p` | Passive port discovery (`naabu -passive`) |
 | `-o` | Origin IP discovery behind WAF/CDN |
 | `--only <phases>` | Run ONLY these phases (comma sep): `enum,bruteforce,probe,origin,ports,takeover,crawl` |
-| `-f <file>` | Host list to feed a phase run via `--only` when enum/probe aren't in the list |
+| `-f <file>` | Host list to feed a phase run via `--only` when enum/probe aren't in the list; with no `-d`/`-l`, auto-splits by root domain |
+| `-O <dir>` | Collect each domain's primary output into `<dir>/<root>.txt` (one file per root domain) |
 | `-j <n>` | Max concurrent tool jobs (default 8) |
 | `-v` | Verbose — log the actual command run per tool (API keys redacted) |
 | `-c` | Report available tools/keys, then exit |
@@ -184,6 +185,24 @@ host-consuming phase has no way to get hosts. Note the `crawl`/`takeover`/
 `ports` phases still archive-crawl / query the same external services as
 always, so they're subject to the same rate limits described under
 Troubleshooting.
+
+#### Auto-split a mixed host list by root domain (`-f` alone + `-O`)
+
+If your `-f` file mixes hosts from several root domains and you pass no
+`-d`/`-l`, RecoGun groups the hosts by registered root domain (public-suffix
+aware via `tldextract`) and runs each root as its own target. Add `-O <dir>`
+to collect each domain's primary output — deepest phase that ran: crawl URLs
+> active hosts > all subdomains — as one `<root>.txt` per domain:
+
+```bash
+# hosts.txt contains *.shutterfly.com and *.shutterfly.net hosts, mixed
+./recogun.sh -f hosts.txt --only crawl -C -O out/
+# => out/shutterfly.com.txt  and  out/shutterfly.net.txt
+```
+
+`-O` works with any run, not just auto-split — e.g. `-l domains.txt -C -O out/`
+drops one crawl file per domain into `out/` alongside the usual
+`results/<domain>_<timestamp>/` folders.
 
 ### Scope files (`-x` / `-i`)
 

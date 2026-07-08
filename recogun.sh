@@ -39,6 +39,7 @@ VERBOSE=false
 PERMUTATION_WORDLIST_CUSTOM=false
 ONLY_PHASES=()          # if non-empty, run ONLY these phases
 INPUT_HOSTS_FILE=""     # -f: pre-existing host list for downstream-only phases
+OUTPUT_COLLECT_DIR=""   # -O: collect each domain's key output as <root>.txt here
 RESOLVERS_FILE="${RESOLVERS_FILE:-$SCRIPT_DIR/resolvers.txt}"
 WORDLISTS_DIR="${WORDLISTS_DIR:-$SCRIPT_DIR/wordlists}"
 WORDLIST_FILE="${WORDLIST_FILE:-$WORDLISTS_DIR/subdomains.txt}"
@@ -74,6 +75,29 @@ count_unique_results() {
         sort -u "$file" | wc -l
     else
         echo 0
+    fi
+}
+
+# Registered root domain for a host (public-suffix-aware via tldextract so
+# a.b.example.co.uk -> example.co.uk, not co.uk). Falls back to a naive
+# last-two-labels split if tldextract isn't available.
+_TLDEXTRACT_OK=""
+root_domain() {
+    local host="$1"
+    host="${host#*://}"       # strip scheme if a URL slipped in
+    host="${host%%/*}"        # strip path
+    host="${host%%:*}"        # strip port
+    if [ -z "$_TLDEXTRACT_OK" ]; then
+        if command -v python3 &>/dev/null && python3 -c "import tldextract" &>/dev/null 2>&1; then
+            _TLDEXTRACT_OK=yes
+        else
+            _TLDEXTRACT_OK=no
+        fi
+    fi
+    if [ "$_TLDEXTRACT_OK" = yes ]; then
+        python3 -c "import sys,tldextract; print(tldextract.extract(sys.argv[1]).registered_domain)" "$host" 2>/dev/null
+    else
+        echo "$host" | awk -F. '{ if (NF>=2) print $(NF-1)"."$NF; else print $0 }'
     fi
 }
 
@@ -847,6 +871,27 @@ process_domain() {
     log_message "[+] Report saved to $REPORT" "$GREEN"
     export_json "$domain" "$domain_output_dir" "$final_output"
 
+    # -O: also drop this domain's primary product into a shared folder as
+    # <root>.txt. "Primary product" = the deepest phase that produced output:
+    # crawl URLs > active hosts > all subdomains.
+    if [ -n "$OUTPUT_COLLECT_DIR" ]; then
+        local collect_src=""
+        if [ -s "$domain_output_dir/crawling/final_crawling_results.txt" ]; then
+            collect_src="$domain_output_dir/crawling/final_crawling_results.txt"
+        elif [ -s "$ACTIVE_SUBDOMAINS" ]; then
+            collect_src="$ACTIVE_SUBDOMAINS"
+        elif [ -s "$final_output" ]; then
+            collect_src="$final_output"
+        fi
+        if [ -n "$collect_src" ]; then
+            local root
+            root=$(root_domain "$domain")
+            [ -z "$root" ] && root="$domain"
+            cp "$collect_src" "$OUTPUT_COLLECT_DIR/${root}.txt"
+            log_message "[+] Collected $(count_unique_results "$collect_src") lines -> $OUTPUT_COLLECT_DIR/${root}.txt" "$GREEN"
+        fi
+    fi
+
     echo ""
     log_message "${progress_tag}=== SCAN SUMMARY: $domain ===" "$CYAN"
     log_message "Total Subdomains: $total_subs" "$CYAN"
@@ -1031,6 +1076,7 @@ show_usage() {
     echo "  $0 -d <domain> -v           # Verbose - log the actual command run per tool (keys redacted)"
     echo "  $0 -d <domain> --only <p>   # Run ONLY these phases (comma sep): enum,bruteforce,probe,origin,ports,takeover,crawl"
     echo "  $0 --only crawl -f hosts.txt -d <domain>   # Run one phase against a host list you already have"
+    echo "  $0 --only crawl -f hosts.txt -O out/        # Auto-split hosts by root domain; one <root>.txt per domain in out/"
     echo "  $0 -c                       # Check which dependencies/API keys are available, then exit"
     echo "  $0 -u                       # Check for a newer RecoGun version now, then exit"
     echo ""
@@ -1060,6 +1106,9 @@ show_usage() {
     echo "  - --only runs exactly the phases you name and nothing else. Phases that"
     echo "    consume a host list (crawl/takeover/ports) need enum or probe in the"
     echo "    same --only list to produce one, OR a -f <hosts.txt> you supply."
+    echo "  - -f with no -d/-l auto-splits the host list by registered root domain"
+    echo "    and runs each root as its own target. Add -O <dir> to also collect"
+    echo "    each domain's main output there as <root>.txt."
     echo ""
     echo -e "${GREEN}Examples:${RESET}"
     echo "  $0 -d example.com"
@@ -1090,10 +1139,11 @@ while [ $# -gt 0 ]; do
 done
 set -- "${PREPARSED_ARGS[@]}"
 
-while getopts "d:l:x:i:t:e:j:w:r:m:f:bpocCuvh" opt; do
+while getopts "d:l:x:i:t:e:j:w:r:m:f:O:bpocCuvh" opt; do
     case "$opt" in
         d) DOMAIN="$OPTARG" ;;
         l) DOMAINS_FILE="$OPTARG" ;;
+        O) OUTPUT_COLLECT_DIR="$OPTARG" ;;
         x) OOS_FILE="$OPTARG" ;;
         i) INCLUDE_FILE="$OPTARG" ;;
         t) IFS=',' read -ra TOOLS_TO_RUN <<< "$(echo "$OPTARG" | tr -d ' ')" ;;
@@ -1121,8 +1171,8 @@ done
 # (cron etc.), so it can never block or hang an automated invocation.
 check_for_updates
 
-if [[ -z "$DOMAIN" && -z "$DOMAINS_FILE" ]]; then
-    echo -e "${RED}Error: You must specify either a domain (-d) or a domains file (-l)${RESET}"
+if [[ -z "$DOMAIN" && -z "$DOMAINS_FILE" && -z "$INPUT_HOSTS_FILE" ]]; then
+    echo -e "${RED}Error: You must specify a domain (-d), a domains file (-l), or a host list (-f)${RESET}"
     show_usage
     exit 1
 fi
@@ -1187,10 +1237,11 @@ if [[ -n "$INPUT_HOSTS_FILE" && ! -f "$INPUT_HOSTS_FILE" ]]; then
 fi
 
 mkdir -p "$OUTPUT_DIR"
+[ -n "$OUTPUT_COLLECT_DIR" ] && mkdir -p "$OUTPUT_COLLECT_DIR"
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v5.1                |"
+echo "  |              RecoGun v5.2                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  |                 by $OPERATOR                 |"
 echo "  +=========================================+"
@@ -1214,9 +1265,46 @@ fi
 echo -e "${CYAN}Target : ${RESET}${DOMAIN:-$DOMAINS_FILE}   ${CYAN}Operator : ${RESET}$OPERATOR"
 echo -e "${CYAN}Modules: ${RESET}$MODULES"
 [ -n "$INPUT_HOSTS_FILE" ] && echo -e "${CYAN}Hosts in: ${RESET}$INPUT_HOSTS_FILE"
+[ -n "$OUTPUT_COLLECT_DIR" ] && echo -e "${CYAN}Collect : ${RESET}$OUTPUT_COLLECT_DIR/<root>.txt"
 echo ""
 
-if [[ -n "$DOMAIN" ]]; then
+# Auto-split mode: a -f host file with no explicit -d/-l. Group the hosts by
+# registered root domain and run each root as its own target, seeded with
+# just that root's hosts. This is what powers "--only crawl -f hosts.txt"
+# across a mixed multi-domain host list.
+if [[ -n "$INPUT_HOSTS_FILE" && -z "$DOMAIN" && -z "$DOMAINS_FILE" ]]; then
+    log_message "[*] Auto-splitting $(count_unique_results "$INPUT_HOSTS_FILE") hosts by root domain..." "$BLUE"
+    SPLIT_DIR=$(mktemp -d)
+    while IFS= read -r host || [[ -n "$host" ]]; do
+        host="$(echo "$host" | xargs)"
+        [[ -z "$host" || "$host" =~ ^[[:space:]]*# ]] && continue
+        root=$(root_domain "$host")
+        [ -z "$root" ] && continue
+        echo "$host" >> "$SPLIT_DIR/$root"
+    done < "$INPUT_HOSTS_FILE"
+
+    mapfile -t ROOTS < <(cd "$SPLIT_DIR" && ls -1 | sort)
+    total_domains=${#ROOTS[@]}
+    log_message "[*] Grouped into $total_domains root domain(s)" "$BLUE"
+    domain_index=0
+    domains_with_takeovers=()
+    for root in "${ROOTS[@]}"; do
+        domain_index=$((domain_index + 1))
+        INPUT_HOSTS_FILE="$SPLIT_DIR/$root"
+        process_domain "$root" "$domain_index" "$total_domains"
+        [ -s "$LAST_DOMAIN_OUTPUT_DIR/takeovers.txt" ] && domains_with_takeovers+=("$root")
+        echo ""
+    done
+    rm -rf "$SPLIT_DIR"
+
+    echo -e "${GREEN}"
+    echo "  +=========================================+"
+    echo "  |   ALL $total_domains ROOT DOMAIN(S) COMPLETE"
+    echo "  +=========================================+"
+    echo -e "${RESET}"
+    [ ${#domains_with_takeovers[@]} -gt 0 ] && log_message "Takeovers found on: ${domains_with_takeovers[*]}" "$RED"
+    [ -n "$OUTPUT_COLLECT_DIR" ] && log_message "Per-domain output collected in: $OUTPUT_COLLECT_DIR" "$GREEN"
+elif [[ -n "$DOMAIN" ]]; then
     process_domain "$DOMAIN"
 elif [[ -n "$DOMAINS_FILE" ]]; then
     total_domains=$(grep -cv '^[[:space:]]*\(#\|$\)' "$DOMAINS_FILE")
