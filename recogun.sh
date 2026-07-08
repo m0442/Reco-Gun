@@ -37,6 +37,8 @@ ORIGIN_IP_DISCOVERY=false
 CRAWLING=false
 VERBOSE=false
 PERMUTATION_WORDLIST_CUSTOM=false
+ONLY_PHASES=()          # if non-empty, run ONLY these phases
+INPUT_HOSTS_FILE=""     # -f: pre-existing host list for downstream-only phases
 RESOLVERS_FILE="${RESOLVERS_FILE:-$SCRIPT_DIR/resolvers.txt}"
 WORDLISTS_DIR="${WORDLISTS_DIR:-$SCRIPT_DIR/wordlists}"
 WORDLIST_FILE="${WORDLIST_FILE:-$WORDLISTS_DIR/subdomains.txt}"
@@ -73,6 +75,31 @@ count_unique_results() {
     else
         echo 0
     fi
+}
+
+# --only gate: is this phase in the explicit --only list? With no --only
+# list, every phase passes this gate and normal flag-driven behavior applies.
+# Phase names: enum, bruteforce, probe, origin, ports, takeover, crawl.
+phase_enabled() {
+    local phase="$1"
+    if [ ${#ONLY_PHASES[@]} -eq 0 ]; then
+        return 0
+    fi
+    [[ " ${ONLY_PHASES[*]} " == *" $phase "* ]]
+}
+
+# Opt-in phases (origin/ports/crawl/bruteforce) normally require their own
+# flag (-o/-p/-C/-b). But naming one in --only is itself the opt-in, so this
+# runs the phase if EITHER its flag is set OR --only names it. Always subject
+# to the --only gate above, so --only never runs anything it didn't name.
+optin_phase_runs() {
+    local phase="$1"
+    local flag_set="$2"   # "true"/"false" - the phase's own -flag
+    phase_enabled "$phase" || return 1
+    if [ ${#ONLY_PHASES[@]} -gt 0 ]; then
+        return 0          # named in --only => run it
+    fi
+    [[ "$flag_set" == "true" ]]
 }
 
 # Mask configured API key values in a command string before it's ever
@@ -464,6 +491,15 @@ process_domain() {
     fi
 
     # ---- Phase 1: passive subdomain enumeration (parallel) ----
+    if ! phase_enabled enum; then
+        log_message "[i] Enumeration phase skipped (--only)" "$YELLOW"
+        # Seed the pipeline from the -f host list so downstream phases have
+        # something to work on when enum didn't run.
+        if [ -n "$INPUT_HOSTS_FILE" ]; then
+            sort -u "$INPUT_HOSTS_FILE" > "$final_output"
+            log_message "[i] Seeded $(count_unique_results "$final_output") hosts from $INPUT_HOSTS_FILE" "$CYAN"
+        fi
+    else
     local TOOLS=(
         "subfinder:subfinder -all -silent -d $domain"
         "assetfinder:assetfinder --subs-only $domain"
@@ -504,6 +540,7 @@ process_domain() {
     merge_results "$domain_output_dir/sources" "$final_output"
     apply_scope_filters "$final_output" "$domain_output_dir"
     log_message "[OK] Found $(count_unique_results "$final_output") unique subdomains from passive sources" "$GREEN"
+    fi   # end enum phase
 
     # ---- Phase 1b: origin IP discovery (opt-in, -o) ----
     # Domain-level, not per-subdomain - a CDN/WAF setup is usually org-wide.
@@ -511,7 +548,7 @@ process_domain() {
     # then confirms candidates with a direct GET (Host header spoofed via
     # --resolve) compared against the normal WAF-fronted response. No
     # payloads sent - this is fingerprinting/confirmation, not exploitation.
-    if $ORIGIN_IP_DISCOVERY; then
+    if optin_phase_runs origin "$ORIGIN_IP_DISCOVERY"; then
         log_message "[*] Running origin IP discovery for $domain..." "$BLUE"
         mkdir -p "$domain_output_dir/origin_ip"
 
@@ -546,9 +583,9 @@ process_domain() {
     fi
 
     # ---- Phase 2: permutation + bruteforce (opt-in, -b) ----
-    if $BRUTEFORCE && has_wildcard_dns "$domain"; then
+    if optin_phase_runs bruteforce "$BRUTEFORCE" && has_wildcard_dns "$domain"; then
         log_message "[!] Wildcard DNS detected on $domain - every bruteforce/permutation guess would resolve as a false positive (this is what causes 100k+ fake 'subdomains' and multi-hour httpx runs). Skipping bruteforce/permutation entirely for this domain." "$RED"
-    elif $BRUTEFORCE; then
+    elif optin_phase_runs bruteforce "$BRUTEFORCE"; then
         local resolvers_valid="$RESOLVERS_FILE"
         if [ -f "$RESOLVERS_FILE" ]; then
             resolvers_valid="$domain_output_dir/bruteforce/resolvers_valid.txt"
@@ -620,7 +657,19 @@ process_domain() {
     diff_against_previous "$PREV_DIR/final_subdomains.txt" "$final_output" "$domain_output_dir/new_subdomains.txt" "subdomains"
 
     # ---- Phase 3: HTTP probing ----
-    if [ -s "$final_output" ]; then
+    if ! phase_enabled probe; then
+        log_message "[i] Probe phase skipped (--only)" "$YELLOW"
+        # Downstream phases (crawl/takeover/ports) still need a live-host list.
+        # With probe skipped, seed it from -f (or the seeded final list).
+        if [ ! -s "$ACTIVE_SUBDOMAINS" ]; then
+            if [ -n "$INPUT_HOSTS_FILE" ]; then
+                sort -u "$INPUT_HOSTS_FILE" > "$ACTIVE_SUBDOMAINS"
+            elif [ -s "$final_output" ]; then
+                sort -u "$final_output" > "$ACTIVE_SUBDOMAINS"
+            fi
+            [ -s "$ACTIVE_SUBDOMAINS" ] && log_message "[i] Using $(count_unique_results "$ACTIVE_SUBDOMAINS") hosts as-is (unprobed) for downstream phases" "$CYAN"
+        fi
+    elif [ -s "$final_output" ]; then
         local sub_count
         sub_count=$(count_unique_results "$final_output")
         if [ "$sub_count" -gt 20000 ]; then
@@ -646,7 +695,7 @@ process_domain() {
     # ---- Phase 4: passive port discovery (opt-in, -p) ----
     # naabu -passive uses passive sources (Shodan/Censys), it does not scan
     # the target directly - kept in scope as recon, not active testing.
-    if $PORT_DISCOVERY && [ -s "$ACTIVE_SUBDOMAINS" ]; then
+    if optin_phase_runs ports "$PORT_DISCOVERY" && [ -s "$ACTIVE_SUBDOMAINS" ]; then
         if command -v naabu &>/dev/null; then
             run_tool "naabu" "naabu -list $ACTIVE_SUBDOMAINS -passive -ec -cdn -c 5 -rate 500 -verify -silent" \
                 "$domain_output_dir/naabu.txt"
@@ -656,7 +705,7 @@ process_domain() {
     fi
 
     # ---- Phase 5: subdomain takeover check ----
-    if [ -s "$ACTIVE_SUBDOMAINS" ]; then
+    if phase_enabled takeover && [ -s "$ACTIVE_SUBDOMAINS" ]; then
         log_message "[*] Running subzy for subdomain takeovers..." "$BLUE"
         if command -v subzy &>/dev/null; then
             subzy run --targets "$ACTIVE_SUBDOMAINS" --hide_fails > "$domain_output_dir/takeovers.txt" 2>> "$CURRENT_LOG"
@@ -672,7 +721,7 @@ process_domain() {
     fi
 
     # ---- Phase 6: crawling (parallel, opt-in with -C) ----
-    if ! $CRAWLING; then
+    if ! optin_phase_runs crawl "$CRAWLING"; then
         log_message "[i] Crawling phase skipped (enable with -C)" "$YELLOW"
     elif [ -s "$ACTIVE_SUBDOMAINS" ]; then
         log_message "[*] Running crawling tools..." "$BLUE"
@@ -980,6 +1029,8 @@ show_usage() {
     echo "  $0 -d <domain> -o           # Include origin IP discovery (behind WAF/CDN)"
     echo "  $0 -d <domain> -j <n>       # Max parallel tool jobs (default: 8)"
     echo "  $0 -d <domain> -v           # Verbose - log the actual command run per tool (keys redacted)"
+    echo "  $0 -d <domain> --only <p>   # Run ONLY these phases (comma sep): enum,bruteforce,probe,origin,ports,takeover,crawl"
+    echo "  $0 --only crawl -f hosts.txt -d <domain>   # Run one phase against a host list you already have"
     echo "  $0 -c                       # Check which dependencies/API keys are available, then exit"
     echo "  $0 -u                       # Check for a newer RecoGun version now, then exit"
     echo ""
@@ -1006,6 +1057,9 @@ show_usage() {
     echo "    URLScan, Shodan cert search, uncover and favicon hashing, then confirms"
     echo "    them with a direct GET (Host header spoofed) - no exploitation, just"
     echo "    fingerprinting. Runs once per domain, not per subdomain."
+    echo "  - --only runs exactly the phases you name and nothing else. Phases that"
+    echo "    consume a host list (crawl/takeover/ports) need enum or probe in the"
+    echo "    same --only list to produce one, OR a -f <hosts.txt> you supply."
     echo ""
     echo -e "${GREEN}Examples:${RESET}"
     echo "  $0 -d example.com"
@@ -1016,7 +1070,27 @@ show_usage() {
     echo "  $0 -l domains.txt -j 16"
 }
 
-while getopts "d:l:x:i:t:e:j:w:r:m:bpocCuvh" opt; do
+# getopts handles short flags only, so pull the long --only <list> out of the
+# argument list first, then hand the remainder to getopts unchanged.
+PREPARSED_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --only)
+            shift
+            IFS=',' read -ra ONLY_PHASES <<< "$(echo "$1" | tr -d ' ')"
+            ;;
+        --only=*)
+            IFS=',' read -ra ONLY_PHASES <<< "$(echo "${1#*=}" | tr -d ' ')"
+            ;;
+        *)
+            PREPARSED_ARGS+=("$1")
+            ;;
+    esac
+    shift
+done
+set -- "${PREPARSED_ARGS[@]}"
+
+while getopts "d:l:x:i:t:e:j:w:r:m:f:bpocCuvh" opt; do
     case "$opt" in
         d) DOMAIN="$OPTARG" ;;
         l) DOMAINS_FILE="$OPTARG" ;;
@@ -1028,6 +1102,7 @@ while getopts "d:l:x:i:t:e:j:w:r:m:bpocCuvh" opt; do
         w) WORDLIST_FILE="$OPTARG" ;;
         r) RESOLVERS_FILE="$OPTARG" ;;
         m) PERMUTATION_WORDLIST="$OPTARG"; PERMUTATION_WORDLIST_CUSTOM=true ;;
+        f) INPUT_HOSTS_FILE="$OPTARG" ;;
         b) BRUTEFORCE=true ;;
         p) PORT_DISCOVERY=true ;;
         o) ORIGIN_IP_DISCOVERY=true ;;
@@ -1084,28 +1159,61 @@ if $PERMUTATION_WORDLIST_CUSTOM && [ ! -f "$PERMUTATION_WORDLIST" ]; then
     exit 1
 fi
 
+# --only validation: reject unknown phase names, and require -f (a host list)
+# when a downstream phase is run without enum or probe to produce one.
+if [ ${#ONLY_PHASES[@]} -gt 0 ]; then
+    VALID_PHASES=" enum bruteforce probe origin ports takeover crawl "
+    for ph in "${ONLY_PHASES[@]}"; do
+        if [[ "$VALID_PHASES" != *" $ph "* ]]; then
+            echo -e "${RED}Error: unknown --only phase '$ph'. Valid: enum, bruteforce, probe, origin, ports, takeover, crawl${RESET}"
+            exit 1
+        fi
+    done
+
+    # Phases that consume a host list rather than produce one.
+    needs_hosts=false
+    for ph in crawl takeover ports; do
+        [[ "$VALID_PHASES" ]] && [[ " ${ONLY_PHASES[*]} " == *" $ph "* ]] && needs_hosts=true
+    done
+    if $needs_hosts && ! phase_enabled enum && ! phase_enabled probe && [ -z "$INPUT_HOSTS_FILE" ]; then
+        echo -e "${RED}Error: --only ${ONLY_PHASES[*]} needs a host list but neither enum nor probe is running. Provide one with -f <hosts.txt>.${RESET}"
+        exit 1
+    fi
+fi
+
+if [[ -n "$INPUT_HOSTS_FILE" && ! -f "$INPUT_HOSTS_FILE" ]]; then
+    echo -e "${RED}Error: Input hosts file '$INPUT_HOSTS_FILE' not found${RESET}"
+    exit 1
+fi
+
 mkdir -p "$OUTPUT_DIR"
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v5.0                |"
+echo "  |              RecoGun v5.1                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  |                 by $OPERATOR                 |"
 echo "  +=========================================+"
 echo -e "${RESET}"
 
-# Compact one-glance summary: target + only the optional modules that are
-# actually enabled, so you can see what a run will do without parsing a wall
-# of true/false lines. Scope files noted only when set.
-MODULES="passive-enum"
-$BRUTEFORCE && MODULES="$MODULES +bruteforce"
-$PORT_DISCOVERY && MODULES="$MODULES +ports"
-$ORIGIN_IP_DISCOVERY && MODULES="$MODULES +origin-ip"
-$CRAWLING && MODULES="$MODULES +crawling"
+# Compact one-glance summary: target + only the phases that will actually
+# run, so you can see what a run will do without parsing a wall of
+# true/false lines. In --only mode the list is exactly what was named;
+# otherwise it's the default passive-enum plus whatever opt-in flags added.
+if [ ${#ONLY_PHASES[@]} -gt 0 ]; then
+    MODULES="--only: ${ONLY_PHASES[*]}"
+else
+    MODULES="passive-enum"
+    $BRUTEFORCE && MODULES="$MODULES +bruteforce"
+    $PORT_DISCOVERY && MODULES="$MODULES +ports"
+    $ORIGIN_IP_DISCOVERY && MODULES="$MODULES +origin-ip"
+    $CRAWLING && MODULES="$MODULES +crawling"
+fi
 [[ -n "$INCLUDE_FILE" || -n "$OOS_FILE" ]] && MODULES="$MODULES +scope-filter"
 
 echo -e "${CYAN}Target : ${RESET}${DOMAIN:-$DOMAINS_FILE}   ${CYAN}Operator : ${RESET}$OPERATOR"
 echo -e "${CYAN}Modules: ${RESET}$MODULES"
+[ -n "$INPUT_HOSTS_FILE" ] && echo -e "${CYAN}Hosts in: ${RESET}$INPUT_HOSTS_FILE"
 echo ""
 
 if [[ -n "$DOMAIN" ]]; then

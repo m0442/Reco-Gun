@@ -26,6 +26,7 @@ against your last one, so re-running against a target tells you what's
 - [Flag reference](#flag-reference)
 - [Bundled defaults](#bundled-defaults-wordlists--resolvers)
 - [Feature guides](#feature-guides)
+  - [Running individual phases (`--only`)](#running-individual-phases---only)
   - [Scope files (`-x`/`-i`)](#scope-files--x---i)
   - [Incremental scans](#incremental-scans)
   - [Multi-domain progress (`-l`)](#multi-domain-progress--l)
@@ -118,6 +119,8 @@ chmod +x recogun.sh
 | `-m <file>` | Custom permutation wordlist for `-b` (default: bundled `wordlists/permutations.txt`) |
 | `-p` | Passive port discovery (`naabu -passive`) |
 | `-o` | Origin IP discovery behind WAF/CDN |
+| `--only <phases>` | Run ONLY these phases (comma sep): `enum,bruteforce,probe,origin,ports,takeover,crawl` |
+| `-f <file>` | Host list to feed a phase run via `--only` when enum/probe aren't in the list |
 | `-j <n>` | Max concurrent tool jobs (default 8) |
 | `-v` | Verbose — log the actual command run per tool (API keys redacted) |
 | `-c` | Report available tools/keys, then exit |
@@ -149,6 +152,38 @@ takes effect for `alterx` if you explicitly pass it, in which case it
 replaces alterx's `word` payload outright (`-pp word=<file>`).
 
 ## Feature guides
+
+### Running individual phases (`--only`)
+
+By default a run does passive-enum + probe + takeover (plus whatever opt-in
+flags add). `--only` runs *exactly* the phases you name and nothing else:
+
+```bash
+./recogun.sh -d target.com --only enum              # just gather subdomains
+./recogun.sh -d target.com --only origin            # just origin-IP discovery
+./recogun.sh -d target.com --only takeover,ports    # a couple of phases
+```
+
+Phase names: `enum`, `bruteforce`, `probe`, `origin`, `ports`, `takeover`,
+`crawl`.
+
+Some phases *consume* a live-host list rather than produce one (`crawl`,
+`takeover`, `ports`). If you run one of those without `enum` or `probe` in
+the same `--only` list, supply the hosts yourself with `-f`:
+
+```bash
+# Crawl a list of hosts you already have - no enum, no httpx
+./recogun.sh -d target.com --only crawl -f my_live_hosts.txt
+
+# Just re-check an existing host list for takeovers
+./recogun.sh -d target.com --only takeover -f active_subdomains.txt
+```
+
+RecoGun refuses to start (rather than silently doing nothing) if a
+host-consuming phase has no way to get hosts. Note the `crawl`/`takeover`/
+`ports` phases still archive-crawl / query the same external services as
+always, so they're subject to the same rate limits described under
+Troubleshooting.
 
 ### Scope files (`-x` / `-i`)
 
