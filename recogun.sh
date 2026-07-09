@@ -54,6 +54,12 @@ CURRENT_ERRORS=""
 PREV_DIR=""
 LAST_DOMAIN_OUTPUT_DIR=""
 
+# OTX auth header, expanded into tool commands. No space after the colon so
+# it survives unquoted word-splitting through `bash -c` as exactly two args
+# (-H  X-OTX-API-KEY:<key>); empty when no key, which curl simply ignores.
+OTX_HDR=""
+[[ -n "$OTX_API_KEY" ]] && OTX_HDR="-H X-OTX-API-KEY:$OTX_API_KEY"
+
 # Colors
 GREEN='\033[32m'
 RED='\033[31m'
@@ -534,7 +540,7 @@ process_domain() {
         "gau:gau --threads 5 --subs $domain | unfurl -u domains"
         "crtsh:curl -s 'https://crt.sh/?q=%25.$domain&output=json' | jq -r '.[].name_value' | sed 's/\*\.//g' | sort -u"
         "certspotter:curl -sk 'https://api.certspotter.com/v1/issuances?domain=$domain&include_subdomains=true&expand=dns_names' | jq -r '.[].dns_names[]' | sort -u"
-        "alienvault:curl -s 'https://otx.alienvault.com/api/v1/indicators/domain/$domain/passive_dns' | jq -r '.passive_dns[].hostname' | sort -u"
+        "alienvault:curl -s $OTX_HDR 'https://otx.alienvault.com/api/v1/indicators/domain/$domain/passive_dns' | jq -r '.passive_dns[]?.hostname // empty' | sort -u"
         "subdomain-center:curl -s 'https://api.subdomain.center/?domain=$domain' | jq -r '.[]'"
         "bufferover:curl -s 'https://dns.bufferover.run/dns?q=.$domain' | jq -r '.FDNS_A[]? // empty' | sed 's/.*,//' | sort -u"
         "abuseipdb:curl -s 'https://www.abuseipdb.com/whois/$domain' -H 'user-agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36' | grep -E '<li>\w.*</li>' | sed -E 's/<\/?li>//g' | sed -e \"s/\$/.$domain/\" | sort -u"
@@ -546,7 +552,7 @@ process_domain() {
         || log_message "[i] Skipping shosubgo - SHODAN_API_KEY not set" "$YELLOW"
     [[ -n "$CENSYS_API_KEY" ]] && TOOLS+=("censys:censys subdomains $domain | sed 's/^[ \t]*-//; s/-//g'") \
         || log_message "[i] Skipping censys - CENSYS_API_KEY not set" "$YELLOW"
-    [[ -n "$VIRUSTOTAL_API_KEY" ]] && TOOLS+=("virustotal:curl -s 'https://www.virustotal.com/vtapi/v2/domain/report?apikey=$VIRUSTOTAL_API_KEY&domain=$domain' | jq -r '.subdomains[]?'") \
+    [[ -n "$VIRUSTOTAL_API_KEY" ]] && TOOLS+=("virustotal:curl -s 'https://www.virustotal.com/api/v3/domains/$domain/subdomains?limit=40' -H 'x-apikey: $VIRUSTOTAL_API_KEY' | jq -r '.data[]?.id // empty'") \
         || log_message "[i] Skipping virustotal - VIRUSTOTAL_API_KEY not set" "$YELLOW"
     [[ -n "$GITHUB_TOKEN" ]] && TOOLS+=("github-subdomains:github-subdomains -d $domain -t $GITHUB_TOKEN -raw") \
         || log_message "[i] Skipping github-subdomains - GITHUB_TOKEN not set" "$YELLOW"
@@ -576,6 +582,18 @@ process_domain() {
         log_message "[*] Running origin IP discovery for $domain..." "$BLUE"
         mkdir -p "$domain_output_dir/origin_ip"
 
+        # Preflight: these two tools read their OWN config, not config.env, and
+        # fail opaquely (403 / "no keys found") if not set up. Warn once, up
+        # front, with the exact fix - rather than let them error mid-run.
+        if command -v uncover &>/dev/null && [ ! -f "$HOME/.config/uncover/provider-config.yaml" ]; then
+            log_message "[!] uncover has no provider config - it will find nothing. Fix: see 'uncover setup' in the README (it reads ~/.config/uncover/, not config.env)." "$YELLOW"
+        fi
+        if [[ -n "$SHODAN_API_KEY" ]] && command -v shodan &>/dev/null; then
+            if ! shodan info &>/dev/null; then
+                log_message "[!] shodan CLI not authenticated (or plan lacks search) - shodan-cert/favicon will 403. Fix: run 'shodan init $SHODAN_API_KEY'." "$YELLOW"
+            fi
+        fi
+
         if command -v wafw00f &>/dev/null; then
             run_tool "wafw00f" "wafw00f https://$domain -a" "$domain_output_dir/origin_ip/waf_detection.txt"
         else
@@ -584,9 +602,13 @@ process_domain() {
 
         local ORIGIN_TOOLS=()
         if [[ -n "$VIRUSTOTAL_API_KEY" ]]; then
-            ORIGIN_TOOLS+=("vt-resolutions:curl -s 'https://www.virustotal.com/vtapi/v2/domain/report?apikey=$VIRUSTOTAL_API_KEY&domain=$domain' | jq -r '.resolutions[]?.ip_address // empty'")
+            # VT v3 (v2 /vtapi/v2 is dead - returns non-JSON, breaks jq). Key
+            # goes in the x-apikey header, not the query string.
+            ORIGIN_TOOLS+=("vt-resolutions:curl -s 'https://www.virustotal.com/api/v3/domains/$domain/resolutions?limit=40' -H 'x-apikey: $VIRUSTOTAL_API_KEY' | jq -r '.data[]?.attributes?.ip_address // empty'")
         fi
-        ORIGIN_TOOLS+=("otx-ips:curl -s 'https://otx.alienvault.com/api/v1/indicators/hostname/$domain/url_list?limit=500&page=1' | jq -r '.url_list[]?.result?.urlworker?.ip // empty'")
+        # OTX passive_dns is the endpoint that actually returns resolved IPs
+        # (the old url_list.result.urlworker.ip path was wrong and JSON-fragile).
+        ORIGIN_TOOLS+=("otx-ips:curl -s $OTX_HDR 'https://otx.alienvault.com/api/v1/indicators/domain/$domain/passive_dns' | jq -r '.passive_dns[]?.address // empty' | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$'")
         ORIGIN_TOOLS+=("urlscan-ips:curl -s 'https://urlscan.io/api/v1/search/?q=domain:$domain&size=10000' | jq -r '.results[]?.page?.ip // empty'")
         if [[ -n "$SHODAN_API_KEY" ]] && command -v shodan &>/dev/null; then
             ORIGIN_TOOLS+=("shodan-cert:shodan search --fields ip_str ssl.cert.subject.CN:$domain 200 | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}'")
@@ -1234,7 +1256,7 @@ check_for_updates
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v6.0                |"
+echo "  |              RecoGun v6.1                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  |                 by $OPERATOR                 |"
 echo "  +=========================================+"

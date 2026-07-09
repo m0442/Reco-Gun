@@ -145,6 +145,43 @@ patterns, so RecoGun doesn't silently swap it out for a generic wordlist —
 
 ## Feature guides
 
+### Setting up the `origin` phase
+
+Most origin sources work off `config.env` keys, but three tools read their
+**own** config and will fail opaquely (403 / "no keys found") if not set up.
+RecoGun warns about each at the start of the `origin` phase; here's the fix
+for each:
+
+- **`shodan`** (used by `shodan-cert` + favicon-hash search) — needs its own
+  one-time auth even with `SHODAN_API_KEY` in `config.env`:
+  ```bash
+  shodan init <your-shodan-key>
+  shodan info      # should print your plan + query credits, not an error
+  ```
+  A 403 here also means your Shodan plan may not include `search`.
+
+- **`uncover`** — reads `~/.config/uncover/provider-config.yaml`, not
+  `config.env`. Create it with the keys you have (any subset works; blank
+  ones are skipped):
+  ```yaml
+  # ~/.config/uncover/provider-config.yaml
+  shodan: [ "YOUR_SHODAN_KEY" ]
+  censys: [ "API_ID:API_SECRET" ]
+  fofa:   [ "EMAIL:FOFA_KEY" ]
+  quake:  [ "QUAKE_KEY" ]
+  hunter: [ "HUNTER_KEY" ]
+  netlas: [ "NETLAS_KEY" ]
+  ```
+
+- **OTX / AlienVault** (`otx-ips` + the `alienvault` enum source) — OTX now
+  rate-limits anonymous access. Add a free key to `config.env`:
+  ```
+  OTX_API_KEY=your_otx_key    # from otx.alienvault.com -> Settings -> API
+  ```
+
+VirusTotal sources use the **v3** API (the old v2 `/vtapi/v2` endpoints were
+shut down and returned non-JSON, breaking the sources — fixed as of v6.1).
+
 ### Crawl a list of hosts you already have
 
 Point `crawl` at a file of live hosts. RecoGun groups them by registered
