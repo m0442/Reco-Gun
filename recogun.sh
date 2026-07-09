@@ -1056,283 +1056,255 @@ check_for_updates() {
 }
 
 show_usage() {
-    echo -e "${BLUE}RecoGun - Automated Subdomain Enumeration and Reconnaissance${RESET}"
+    echo -e "${BLUE}RecoGun - Automated Reconnaissance Tool${RESET}  by $OPERATOR"
     echo ""
-    echo -e "${GREEN}Usage:${RESET}"
-    echo "  $0 -d <domain>              # Scan single domain"
-    echo "  $0 -l <domains_file>        # Scan multiple domains from file"
-    echo "  $0 -d <domain> -t <tools>   # Run specific tools only (comma separated) - applies to both passive-enum AND crawling tool names"
-    echo "  $0 -d <domain> -e <tools>   # Exclude specific tools (comma separated) - e.g. -e katana to skip just katana"
-    echo "  $0 -d <domain> -C           # Enable the crawling phase (waymore/waybackurls/gau-crawl/katana) - off by default"
-    echo "  $0 -d <domain> -x <oos.txt> # Exclude out-of-scope subdomains/patterns"
-    echo "  $0 -d <domain> -i <in.txt>  # Restrict to an include-only subdomain scope"
-    echo "  $0 -d <domain> -b           # Include DNS permutation + wordlist bruteforce"
-    echo "  $0 -d <domain> -b -w <file> # Bruteforce with a custom wordlist (default: bundled wordlists/subdomains.txt)"
-    echo "  $0 -d <domain> -b -r <file> # Bruteforce with a custom resolvers list (default: bundled resolvers.txt)"
-    echo "  $0 -d <domain> -b -m <file> # Custom permutation wordlist for dnsgen/alterx (default: bundled wordlists/permutations.txt)"
-    echo "  $0 -d <domain> -p           # Include passive port discovery (naabu -passive)"
-    echo "  $0 -d <domain> -o           # Include origin IP discovery (behind WAF/CDN)"
-    echo "  $0 -d <domain> -j <n>       # Max parallel tool jobs (default: 8)"
-    echo "  $0 -d <domain> -v           # Verbose - log the actual command run per tool (keys redacted)"
-    echo "  $0 -d <domain> --only <p>   # Run ONLY these phases (comma sep): enum,bruteforce,probe,origin,ports,takeover,crawl"
-    echo "  $0 --only crawl -f hosts.txt -d <domain>   # Run one phase against a host list you already have"
-    echo "  $0 --only crawl -f hosts.txt -O out/        # Auto-split hosts by root domain; one <root>.txt per domain in out/"
-    echo "  $0 -c                       # Check which dependencies/API keys are available, then exit"
-    echo "  $0 -u                       # Check for a newer RecoGun version now, then exit"
+    echo -e "${GREEN}Usage:${RESET}  recogun <command> <target> [options]"
     echo ""
-    echo -e "${GREEN}Notes:${RESET}"
-    echo "  - Every normal run also auto-checks for updates (git fetch, ~10s max"
-    echo "    timeout). In a real terminal it asks [y/N] before pulling; in a"
-    echo "    non-interactive session (cron etc.) it never prompts - it just logs"
-    echo "    that one's available and continues with the current version."
-    echo "  - Every run prints a config summary (target, active flags, scope,"
-    echo "    parallel jobs) before scanning starts, so you can see exactly what"
-    echo "    is about to run."
-    echo "  - If a previous scan exists for the domain in results/, new subdomains,"
-    echo "    active hosts, and URLs are automatically diffed and reported."
-    echo "  - Scope files (-x/-i) accept exact subdomains or *.domain.tld wildcards,"
-    echo "    one per line, # for comments."
-    echo "  - -b works out of the box with no setup: a default wordlist"
-    echo "    (SecLists subdomains-top1million-5000), default resolvers list,"
-    echo "    and default permutation wordlist (OneListForAll permutations)"
-    echo "    all ship in the repo. Pass -w/-r/-m to use your own instead."
-    echo "  - -m only forces alterx to swap its curated word list outright"
-    echo "    (-pp word=file). Without -m, alterx just enriches its own"
-    echo "    list (-en) since that list is purpose-built for its patterns."
-    echo "  - Origin IP discovery (-o) gathers candidates from VirusTotal, AlienVault,"
-    echo "    URLScan, Shodan cert search, uncover and favicon hashing, then confirms"
-    echo "    them with a direct GET (Host header spoofed) - no exploitation, just"
-    echo "    fingerprinting. Runs once per domain, not per subdomain."
-    echo "  - --only runs exactly the phases you name and nothing else. Phases that"
-    echo "    consume a host list (crawl/takeover/ports) need enum or probe in the"
-    echo "    same --only list to produce one, OR a -f <hosts.txt> you supply."
-    echo "  - -f with no -d/-l auto-splits the host list by registered root domain"
-    echo "    and runs each root as its own target. Add -O <dir> to also collect"
-    echo "    each domain's main output there as <root>.txt."
+    echo -e "${GREEN}Commands:${RESET}"
+    echo "  scan <target>       Default recon: enum -> probe -> takeover"
+    echo "  full <target>       Everything: enum, bruteforce, probe, origin, ports, takeover, crawl"
+    echo "  enum <target>       Only find subdomains"
+    echo "  probe <target>      Only enum + httpx probe (which subdomains are live)"
+    echo "  crawl <target>      Only crawl (waymore/waybackurls/gau/katana)"
+    echo "  origin <target>     Only origin-IP-behind-WAF discovery"
+    echo "  ports <target>      Only passive port discovery (naabu -passive)"
+    echo "  takeover <target>   Only subdomain-takeover checks"
+    echo "  run <phases> <target>   Custom combo, e.g. 'run enum,crawl example.com'"
+    echo "  check               Report which tools/API keys are available, then exit"
+    echo "  update              Check for a newer RecoGun version, then exit"
+    echo ""
+    echo -e "${GREEN}Target${RESET} is auto-detected:"
+    echo "  a domain            example.com"
+    echo "  a file of domains   domains.txt   (bare roots, one per line -> enumerated)"
+    echo "  a file of hosts     hosts.txt     (full subdomains -> split by root, fed straight in)"
+    echo ""
+    echo -e "${GREEN}Options:${RESET}"
+    echo "  -o <dir>            Collect each domain's main output as <root>.txt in this folder"
+    echo "  -j <n>              Max parallel tool jobs (default: 8)"
+    echo "  -v                  Verbose - log the actual command run per tool (keys redacted)"
+    echo "  --scope <file>      Include-only scope (exact subs or *.domain.tld, one per line)"
+    echo "  --oos <file>        Out-of-scope list (same format) - dropped from results"
+    echo "  --wordlist <file>   Custom bruteforce wordlist (default: bundled)"
+    echo "  --resolvers <file>  Custom resolvers list (default: bundled)"
+    echo "  --perms <file>      Custom permutation wordlist (default: bundled)"
+    echo "  --exclude <t1,t2>   Skip these tools by name (e.g. --exclude katana,amass)"
     echo ""
     echo -e "${GREEN}Examples:${RESET}"
-    echo "  $0 -d example.com"
-    echo "  $0 -d example.com -t subfinder,assetfinder,crtsh"
-    echo "  $0 -d example.com -e amass,chaos -b -p"
-    echo "  $0 -d example.com -x oos.txt -i in.txt"
-    echo "  $0 -d example.com -o"
-    echo "  $0 -l domains.txt -j 16"
+    echo "  recogun scan example.com"
+    echo "  recogun full example.com -v"
+    echo "  recogun crawl hosts.txt -o out/          # split by root, one out/<root>.txt each"
+    echo "  recogun enum domains.txt -o subs/"
+    echo "  recogun run enum,takeover example.com"
+    echo "  recogun origin example.com"
 }
 
-# getopts handles short flags only, so pull the long --only <list> out of the
-# argument list first, then hand the remainder to getopts unchanged.
-PREPARSED_ARGS=()
+# Translate a subcommand into the explicit phase list the engine runs. The
+# engine is driven entirely by ONLY_PHASES, so every command just sets it.
+set_phases_for_command() {
+    case "$1" in
+        scan)     ONLY_PHASES=(enum probe takeover) ;;
+        full)     ONLY_PHASES=(enum bruteforce probe origin ports takeover crawl) ;;
+        enum)     ONLY_PHASES=(enum) ;;
+        probe)    ONLY_PHASES=(enum probe) ;;
+        crawl)    ONLY_PHASES=(crawl) ;;
+        origin)   ONLY_PHASES=(origin) ;;
+        ports)    ONLY_PHASES=(enum probe ports) ;;
+        takeover) ONLY_PHASES=(enum probe takeover) ;;
+        *)        return 1 ;;
+    esac
+}
+
+# Guess whether a target string is a domain, a file of bare root domains, or
+# a file of full hosts. Files are classified by sampling their lines: if most
+# lines have 3+ dot-separated labels (sub.dom.tld) they're hosts; if 2
+# (dom.tld) they're root domains.
+detect_target_kind() {
+    local target="$1"
+    if [ ! -f "$target" ]; then
+        echo "domain"; return
+    fi
+    local sample host_like=0 total=0
+    while IFS= read -r line && [ "$total" -lt 20 ]; do
+        line="$(echo "$line" | xargs)"
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        total=$((total + 1))
+        local root
+        root=$(root_domain "$line")
+        # If the line has more labels than its own registered root, it's a host.
+        [[ -n "$root" && "$line" != "$root" ]] && host_like=$((host_like + 1))
+    done < "$target"
+    if [ "$total" -eq 0 ]; then
+        echo "domainfile"   # empty-ish; treat as domain list, harmless
+    elif [ "$host_like" -gt $((total / 2)) ]; then
+        echo "hostfile"
+    else
+        echo "domainfile"
+    fi
+}
+
+# --- Parse: first positional is the command, second is the target (unless
+# the command is check/update which take neither). Remaining args are options.
+COMMAND="${1:-}"
+[ $# -gt 0 ] && shift
+
+case "$COMMAND" in
+    ""|-h|--help|help)
+        show_usage; exit 0 ;;
+    check)
+        check_dependencies; exit 0 ;;
+    update)
+        check_for_updates true; exit 0 ;;
+    scan|full|enum|probe|crawl|origin|ports|takeover)
+        set_phases_for_command "$COMMAND"
+        TARGET="${1:-}"; [ $# -gt 0 ] && shift ;;
+    run)
+        RUN_PHASES="${1:-}"; [ $# -gt 0 ] && shift
+        IFS=',' read -ra ONLY_PHASES <<< "$(echo "$RUN_PHASES" | tr -d ' ')"
+        TARGET="${1:-}"; [ $# -gt 0 ] && shift ;;
+    *)
+        echo -e "${RED}Error: unknown command '$COMMAND'${RESET}"
+        show_usage; exit 1 ;;
+esac
+
+# Enable the opt-in booleans for whatever phases the command selected, so the
+# engine's optin_phase_runs() checks pass. (In --only/ONLY_PHASES mode these
+# booleans aren't strictly required, but setting them keeps behavior obvious.)
+for ph in "${ONLY_PHASES[@]}"; do
+    case "$ph" in
+        bruteforce) BRUTEFORCE=true ;;
+        ports)      PORT_DISCOVERY=true ;;
+        origin)     ORIGIN_IP_DISCOVERY=true ;;
+        crawl)      CRAWLING=true ;;
+    esac
+done
+
+# --- Remaining options (order-independent, long + short) ---
 while [ $# -gt 0 ]; do
     case "$1" in
-        --only)
-            shift
-            IFS=',' read -ra ONLY_PHASES <<< "$(echo "$1" | tr -d ' ')"
-            ;;
-        --only=*)
-            IFS=',' read -ra ONLY_PHASES <<< "$(echo "${1#*=}" | tr -d ' ')"
-            ;;
+        -o)            OUTPUT_COLLECT_DIR="$2"; shift 2 ;;
+        -j)            PARALLEL_JOBS="$2"; shift 2 ;;
+        -v)            VERBOSE=true; shift ;;
+        --scope)       INCLUDE_FILE="$2"; shift 2 ;;
+        --oos)         OOS_FILE="$2"; shift 2 ;;
+        --wordlist)    WORDLIST_FILE="$2"; shift 2 ;;
+        --resolvers)   RESOLVERS_FILE="$2"; shift 2 ;;
+        --perms)       PERMUTATION_WORDLIST="$2"; PERMUTATION_WORDLIST_CUSTOM=true; shift 2 ;;
+        --exclude)     IFS=',' read -ra TOOLS_TO_EXCLUDE <<< "$(echo "$2" | tr -d ' ')"; shift 2 ;;
         *)
-            PREPARSED_ARGS+=("$1")
-            ;;
-    esac
-    shift
-done
-set -- "${PREPARSED_ARGS[@]}"
-
-while getopts "d:l:x:i:t:e:j:w:r:m:f:O:bpocCuvh" opt; do
-    case "$opt" in
-        d) DOMAIN="$OPTARG" ;;
-        l) DOMAINS_FILE="$OPTARG" ;;
-        O) OUTPUT_COLLECT_DIR="$OPTARG" ;;
-        x) OOS_FILE="$OPTARG" ;;
-        i) INCLUDE_FILE="$OPTARG" ;;
-        t) IFS=',' read -ra TOOLS_TO_RUN <<< "$(echo "$OPTARG" | tr -d ' ')" ;;
-        e) IFS=',' read -ra TOOLS_TO_EXCLUDE <<< "$(echo "$OPTARG" | tr -d ' ')" ;;
-        j) PARALLEL_JOBS="$OPTARG" ;;
-        w) WORDLIST_FILE="$OPTARG" ;;
-        r) RESOLVERS_FILE="$OPTARG" ;;
-        m) PERMUTATION_WORDLIST="$OPTARG"; PERMUTATION_WORDLIST_CUSTOM=true ;;
-        f) INPUT_HOSTS_FILE="$OPTARG" ;;
-        b) BRUTEFORCE=true ;;
-        p) PORT_DISCOVERY=true ;;
-        o) ORIGIN_IP_DISCOVERY=true ;;
-        C) CRAWLING=true ;;
-        v) VERBOSE=true ;;
-        c) check_dependencies; exit 0 ;;
-        u) check_for_updates true; exit 0 ;;
-        h) show_usage; exit 0 ;;
-        *) show_usage; exit 1 ;;
+            echo -e "${RED}Error: unknown option '$1'${RESET}"
+            show_usage; exit 1 ;;
     esac
 done
 
-
-# Automatic check on every normal run - self-skips if this isn't a git
-# checkout, the network is unreachable, or stdin isn't a real terminal
-# (cron etc.), so it can never block or hang an automated invocation.
-check_for_updates
-
-if [[ -z "$DOMAIN" && -z "$DOMAINS_FILE" && -z "$INPUT_HOSTS_FILE" ]]; then
-    echo -e "${RED}Error: You must specify a domain (-d), a domains file (-l), or a host list (-f)${RESET}"
-    show_usage
-    exit 1
+# --- Validate ---
+if [ -z "$TARGET" ]; then
+    echo -e "${RED}Error: '$COMMAND' needs a target (domain, domains file, or hosts file)${RESET}"
+    show_usage; exit 1
 fi
 
-if [[ -n "$DOMAINS_FILE" && ! -f "$DOMAINS_FILE" ]]; then
-    echo -e "${RED}Error: Domains file '$DOMAINS_FILE' not found${RESET}"
-    exit 1
-fi
-
-if [[ -n "$OOS_FILE" && ! -f "$OOS_FILE" ]]; then
-    echo -e "${RED}Error: Out-of-scope file '$OOS_FILE' not found${RESET}"
-    exit 1
-fi
-
-if [[ -n "$INCLUDE_FILE" && ! -f "$INCLUDE_FILE" ]]; then
-    echo -e "${RED}Error: Include-scope file '$INCLUDE_FILE' not found${RESET}"
-    exit 1
-fi
-
-# Only matter when -b is actually used - a bundled default wordlist/resolvers
-# file ships in the repo, but -w/-r let you point at something else entirely.
-if $BRUTEFORCE && [ ! -f "$WORDLIST_FILE" ]; then
-    echo -e "${RED}Error: Wordlist file '$WORDLIST_FILE' not found${RESET}"
-    exit 1
-fi
-
-if $BRUTEFORCE && [ ! -f "$RESOLVERS_FILE" ]; then
-    echo -e "${RED}Error: Resolvers file '$RESOLVERS_FILE' not found${RESET}"
-    exit 1
-fi
-
-if $PERMUTATION_WORDLIST_CUSTOM && [ ! -f "$PERMUTATION_WORDLIST" ]; then
-    echo -e "${RED}Error: Permutation wordlist '$PERMUTATION_WORDLIST' not found${RESET}"
-    exit 1
-fi
-
-# --only validation: reject unknown phase names, and require -f (a host list)
-# when a downstream phase is run without enum or probe to produce one.
-if [ ${#ONLY_PHASES[@]} -gt 0 ]; then
-    VALID_PHASES=" enum bruteforce probe origin ports takeover crawl "
-    for ph in "${ONLY_PHASES[@]}"; do
-        if [[ "$VALID_PHASES" != *" $ph "* ]]; then
-            echo -e "${RED}Error: unknown --only phase '$ph'. Valid: enum, bruteforce, probe, origin, ports, takeover, crawl${RESET}"
-            exit 1
-        fi
-    done
-
-    # Phases that consume a host list rather than produce one.
-    needs_hosts=false
-    for ph in crawl takeover ports; do
-        [[ "$VALID_PHASES" ]] && [[ " ${ONLY_PHASES[*]} " == *" $ph "* ]] && needs_hosts=true
-    done
-    if $needs_hosts && ! phase_enabled enum && ! phase_enabled probe && [ -z "$INPUT_HOSTS_FILE" ]; then
-        echo -e "${RED}Error: --only ${ONLY_PHASES[*]} needs a host list but neither enum nor probe is running. Provide one with -f <hosts.txt>.${RESET}"
+VALID_PHASES=" enum bruteforce probe origin ports takeover crawl "
+for ph in "${ONLY_PHASES[@]}"; do
+    if [[ "$VALID_PHASES" != *" $ph "* ]]; then
+        echo -e "${RED}Error: unknown phase '$ph'. Valid: enum, bruteforce, probe, origin, ports, takeover, crawl${RESET}"
         exit 1
     fi
-fi
+done
 
-if [[ -n "$INPUT_HOSTS_FILE" && ! -f "$INPUT_HOSTS_FILE" ]]; then
-    echo -e "${RED}Error: Input hosts file '$INPUT_HOSTS_FILE' not found${RESET}"
-    exit 1
-fi
+$BRUTEFORCE && [ ! -f "$WORDLIST_FILE" ] && { echo -e "${RED}Error: Wordlist file '$WORDLIST_FILE' not found${RESET}"; exit 1; }
+$BRUTEFORCE && [ ! -f "$RESOLVERS_FILE" ] && { echo -e "${RED}Error: Resolvers file '$RESOLVERS_FILE' not found${RESET}"; exit 1; }
+$PERMUTATION_WORDLIST_CUSTOM && [ ! -f "$PERMUTATION_WORDLIST" ] && { echo -e "${RED}Error: Permutation wordlist '$PERMUTATION_WORDLIST' not found${RESET}"; exit 1; }
+[ -n "$INCLUDE_FILE" ] && [ ! -f "$INCLUDE_FILE" ] && { echo -e "${RED}Error: Scope file '$INCLUDE_FILE' not found${RESET}"; exit 1; }
+[ -n "$OOS_FILE" ] && [ ! -f "$OOS_FILE" ] && { echo -e "${RED}Error: OOS file '$OOS_FILE' not found${RESET}"; exit 1; }
+
+# --- Resolve target into a run mode ---
+TARGET_KIND=$(detect_target_kind "$TARGET")
+
+# Phases that consume a host list rather than producing one.
+needs_hosts=false
+for ph in crawl takeover ports; do
+    [[ " ${ONLY_PHASES[*]} " == *" $ph "* ]] && needs_hosts=true
+done
+have_producer=false
+{ [[ " ${ONLY_PHASES[*]} " == *" enum "* ]] || [[ " ${ONLY_PHASES[*]} " == *" probe "* ]]; } && have_producer=true
 
 mkdir -p "$OUTPUT_DIR"
 [ -n "$OUTPUT_COLLECT_DIR" ] && mkdir -p "$OUTPUT_COLLECT_DIR"
 
+check_for_updates
+
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v5.2                |"
+echo "  |              RecoGun v6.0                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  |                 by $OPERATOR                 |"
 echo "  +=========================================+"
 echo -e "${RESET}"
-
-# Compact one-glance summary: target + only the phases that will actually
-# run, so you can see what a run will do without parsing a wall of
-# true/false lines. In --only mode the list is exactly what was named;
-# otherwise it's the default passive-enum plus whatever opt-in flags added.
-if [ ${#ONLY_PHASES[@]} -gt 0 ]; then
-    MODULES="--only: ${ONLY_PHASES[*]}"
-else
-    MODULES="passive-enum"
-    $BRUTEFORCE && MODULES="$MODULES +bruteforce"
-    $PORT_DISCOVERY && MODULES="$MODULES +ports"
-    $ORIGIN_IP_DISCOVERY && MODULES="$MODULES +origin-ip"
-    $CRAWLING && MODULES="$MODULES +crawling"
-fi
-[[ -n "$INCLUDE_FILE" || -n "$OOS_FILE" ]] && MODULES="$MODULES +scope-filter"
-
-echo -e "${CYAN}Target : ${RESET}${DOMAIN:-$DOMAINS_FILE}   ${CYAN}Operator : ${RESET}$OPERATOR"
-echo -e "${CYAN}Modules: ${RESET}$MODULES"
-[ -n "$INPUT_HOSTS_FILE" ] && echo -e "${CYAN}Hosts in: ${RESET}$INPUT_HOSTS_FILE"
-[ -n "$OUTPUT_COLLECT_DIR" ] && echo -e "${CYAN}Collect : ${RESET}$OUTPUT_COLLECT_DIR/<root>.txt"
+echo -e "${CYAN}Command: ${RESET}$COMMAND    ${CYAN}Phases: ${RESET}${ONLY_PHASES[*]}"
+echo -e "${CYAN}Target : ${RESET}$TARGET (${TARGET_KIND})"
+[ -n "$OUTPUT_COLLECT_DIR" ] && echo -e "${CYAN}Collect: ${RESET}$OUTPUT_COLLECT_DIR/<root>.txt"
 echo ""
 
-# Auto-split mode: a -f host file with no explicit -d/-l. Group the hosts by
-# registered root domain and run each root as its own target, seeded with
-# just that root's hosts. This is what powers "--only crawl -f hosts.txt"
-# across a mixed multi-domain host list.
-if [[ -n "$INPUT_HOSTS_FILE" && -z "$DOMAIN" && -z "$DOMAINS_FILE" ]]; then
-    log_message "[*] Auto-splitting $(count_unique_results "$INPUT_HOSTS_FILE") hosts by root domain..." "$BLUE"
-    SPLIT_DIR=$(mktemp -d)
-    while IFS= read -r host || [[ -n "$host" ]]; do
-        host="$(echo "$host" | xargs)"
-        [[ -z "$host" || "$host" =~ ^[[:space:]]*# ]] && continue
-        root=$(root_domain "$host")
-        [ -z "$root" ] && continue
-        echo "$host" >> "$SPLIT_DIR/$root"
-    done < "$INPUT_HOSTS_FILE"
+# --- Dispatch ---
+case "$TARGET_KIND" in
+    domain)
+        # A host-consuming-only command against a bare domain has no producer
+        # and no host file - can't work.
+        if $needs_hosts && ! $have_producer; then
+            echo -e "${RED}Error: '$COMMAND' needs live hosts but has no way to get them for a single domain. Give it a hosts file instead, or use 'scan'/'full'.${RESET}"
+            exit 1
+        fi
+        process_domain "$TARGET"
+        ;;
 
-    mapfile -t ROOTS < <(cd "$SPLIT_DIR" && ls -1 | sort)
-    total_domains=${#ROOTS[@]}
-    log_message "[*] Grouped into $total_domains root domain(s)" "$BLUE"
-    domain_index=0
-    domains_with_takeovers=()
-    for root in "${ROOTS[@]}"; do
-        domain_index=$((domain_index + 1))
-        INPUT_HOSTS_FILE="$SPLIT_DIR/$root"
-        process_domain "$root" "$domain_index" "$total_domains"
-        [ -s "$LAST_DOMAIN_OUTPUT_DIR/takeovers.txt" ] && domains_with_takeovers+=("$root")
-        echo ""
-    done
-    rm -rf "$SPLIT_DIR"
+    hostfile)
+        # Split the host file by root domain, feed each root's hosts straight in.
+        log_message "[*] Splitting $(count_unique_results "$TARGET") hosts by root domain..." "$BLUE"
+        SPLIT_DIR=$(mktemp -d)
+        while IFS= read -r host || [[ -n "$host" ]]; do
+            host="$(echo "$host" | xargs)"
+            [[ -z "$host" || "$host" == \#* ]] && continue
+            root=$(root_domain "$host"); [ -z "$root" ] && continue
+            echo "$host" >> "$SPLIT_DIR/$root"
+        done < "$TARGET"
+        mapfile -t ROOTS < <(cd "$SPLIT_DIR" && ls -1 | sort)
+        total_domains=${#ROOTS[@]}
+        log_message "[*] $total_domains root domain(s)" "$BLUE"
+        idx=0; tko=()
+        for root in "${ROOTS[@]}"; do
+            idx=$((idx + 1))
+            INPUT_HOSTS_FILE="$SPLIT_DIR/$root"
+            process_domain "$root" "$idx" "$total_domains"
+            [ -s "$LAST_DOMAIN_OUTPUT_DIR/takeovers.txt" ] && tko+=("$root")
+            echo ""
+        done
+        rm -rf "$SPLIT_DIR"
+        echo -e "${GREEN}  === ALL $total_domains ROOT DOMAIN(S) COMPLETE ===${RESET}"
+        [ ${#tko[@]} -gt 0 ] && log_message "Takeovers found on: ${tko[*]}" "$RED"
+        [ -n "$OUTPUT_COLLECT_DIR" ] && log_message "Output collected in: $OUTPUT_COLLECT_DIR" "$GREEN"
+        ;;
 
-    echo -e "${GREEN}"
-    echo "  +=========================================+"
-    echo "  |   ALL $total_domains ROOT DOMAIN(S) COMPLETE"
-    echo "  +=========================================+"
-    echo -e "${RESET}"
-    [ ${#domains_with_takeovers[@]} -gt 0 ] && log_message "Takeovers found on: ${domains_with_takeovers[*]}" "$RED"
-    [ -n "$OUTPUT_COLLECT_DIR" ] && log_message "Per-domain output collected in: $OUTPUT_COLLECT_DIR" "$GREEN"
-elif [[ -n "$DOMAIN" ]]; then
-    process_domain "$DOMAIN"
-elif [[ -n "$DOMAINS_FILE" ]]; then
-    total_domains=$(grep -cv '^[[:space:]]*\(#\|$\)' "$DOMAINS_FILE")
-    log_message "[*] Processing $total_domains domain(s) from file: $DOMAINS_FILE" "$BLUE"
-    domain_index=0
-    domains_with_takeovers=()
-    domains_with_errors=()
-    while IFS= read -r domain || [[ -n "$domain" ]]; do
-        [[ -z "$domain" || "$domain" =~ ^[[:space:]]*# ]] && continue
-        domain_index=$((domain_index + 1))
-        domain="$(echo "$domain" | xargs)"
-        process_domain "$domain" "$domain_index" "$total_domains"
-        [ -s "$LAST_DOMAIN_OUTPUT_DIR/takeovers.txt" ] && domains_with_takeovers+=("$domain")
-        [ -s "$LAST_DOMAIN_OUTPUT_DIR/.tool_errors" ] && domains_with_errors+=("$domain")
-        echo ""
-    done < "$DOMAINS_FILE"
+    domainfile)
+        # A file of bare root domains: enumerate each. If the command is
+        # host-consuming-only (no producer), it has no hosts per domain.
+        if $needs_hosts && ! $have_producer; then
+            echo -e "${RED}Error: '$COMMAND' needs live hosts, but '$TARGET' is a list of bare domains with no enum/probe to find them. Use a hosts file, or 'scan'/'full'.${RESET}"
+            exit 1
+        fi
+        total_domains=$(grep -cv '^[[:space:]]*\(#\|$\)' "$TARGET")
+        log_message "[*] Processing $total_domains domain(s) from $TARGET" "$BLUE"
+        idx=0; tko=(); errs=()
+        while IFS= read -r domain || [[ -n "$domain" ]]; do
+            [[ -z "$domain" || "$domain" =~ ^[[:space:]]*# ]] && continue
+            idx=$((idx + 1)); domain="$(echo "$domain" | xargs)"
+            process_domain "$domain" "$idx" "$total_domains"
+            [ -s "$LAST_DOMAIN_OUTPUT_DIR/takeovers.txt" ] && tko+=("$domain")
+            [ -s "$LAST_DOMAIN_OUTPUT_DIR/.tool_errors" ] && errs+=("$domain")
+            echo ""
+        done < "$TARGET"
+        echo -e "${GREEN}  === ALL $total_domains DOMAIN(S) COMPLETE ===${RESET}"
+        [ ${#tko[@]} -gt 0 ] && log_message "Takeovers found on: ${tko[*]}" "$RED"
+        [ ${#errs[@]} -gt 0 ] && log_message "Domains with tool errors: ${errs[*]}" "$YELLOW"
+        ;;
+esac
 
-    echo -e "${GREEN}"
-    echo "  +=========================================+"
-    echo "  |   ALL $total_domains DOMAIN(S) COMPLETE"
-    echo "  +=========================================+"
-    echo -e "${RESET}"
-    if [ ${#domains_with_takeovers[@]} -gt 0 ]; then
-        log_message "Takeovers found on: ${domains_with_takeovers[*]}" "$RED"
-    fi
-    if [ ${#domains_with_errors[@]} -gt 0 ]; then
-        log_message "Domains with tool errors: ${domains_with_errors[*]}" "$YELLOW"
-    fi
-fi
-
-log_message "[OK] RecoGun scan completed!" "$GREEN"
+log_message "[OK] RecoGun done!" "$GREEN"

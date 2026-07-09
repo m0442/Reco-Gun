@@ -15,50 +15,23 @@ against your last one, so re-running against a target tells you what's
 > **Authorized use only.** This tool is built for bug bounty programs and
 > engagements you are explicitly authorized to test. It performs no
 > exploitation and sends no attack payloads — but scanning a target without
-> permission is on you, not the tool. Respect program scope (`-x`/`-i` exist
-> for exactly this) and rate limits.
+> permission is on you, not the tool. Respect program scope (`--scope`/`--oos`
+> exist for exactly this) and rate limits.
 
 ## Table of contents
 
-- [Features](#features)
 - [Quick start](#quick-start)
+- [Commands](#commands)
+- [Targets (auto-detected)](#targets-auto-detected)
+- [Options](#options)
 - [Methodology](#methodology-what-each-phase-does)
-- [Flag reference](#flag-reference)
 - [Bundled defaults](#bundled-defaults-wordlists--resolvers)
 - [Feature guides](#feature-guides)
-  - [Running individual phases (`--only`)](#running-individual-phases---only)
-  - [Scope files (`-x`/`-i`)](#scope-files--x---i)
-  - [Incremental scans](#incremental-scans)
-  - [Multi-domain progress (`-l`)](#multi-domain-progress--l)
-  - [Auto-update check (`-u`)](#auto-update-check--u)
 - [Output layout](#output-layout)
 - [Troubleshooting](#troubleshooting)
+- [Migrating from v5](#migrating-from-v5)
 - [Architecture notes](#architecture-notes)
 - [Credential hygiene](#credential-hygiene)
-
-## Features
-
-- **20+ passive subdomain sources** — subfinder, assetfinder, findomain,
-  amass, crt.sh, certspotter, AlienVault OTX, subdomain.center, bufferover,
-  AbuseIPDB, and key-gated sources (chaos, shosubgo, censys, virustotal,
-  github/gitlab-subdomains, haktrails) that auto-skip when no key is set.
-- **Origin IP discovery (`-o`)** — find what's actually behind Cloudflare/
-  Akamai/etc. via cert search, historical DNS, favicon hashing, and
-  multi-engine lookup (`uncover`), then confirm candidates with a direct
-  request — no exploitation, just fingerprinting.
-- **Scope-aware** — `-x`/`-i` files keep every phase inside a program's
-  actual scope, including after DNS permutation (which can otherwise wander
-  outside it).
-- **Incremental by default** — every run diffs subdomains, active hosts, and
-  crawled URLs against the last run for the same domain. No flag needed.
-- **Self-contained** — a default wordlist, resolvers list, and permutation
-  wordlist all ship in the repo, so `-b` works right after cloning.
-- **Parallel execution** — passive enumeration, crawling, and resolver
-  validation all run concurrently with a configurable job cap (`-j`).
-- **Fail-soft** — a missing tool or a dead API key never kills the run; it's
-  logged and skipped. `-c` gives you a full dependency/key report up front.
-- **Structured output** — `report.txt` for humans, `report.json` for
-  pipelines/dashboards.
 
 ## Quick start
 
@@ -67,144 +40,128 @@ git clone <this-repo>
 cd RecoGun
 cp config.env.example config.env   # fill in whichever API keys you have
 chmod +x recogun.sh
-./recogun.sh -c                    # see what's actually available
-./recogun.sh -d target.com
-./recogun.sh -d target.com -b      # bruteforce works immediately - see "Bundled defaults" below
+./recogun.sh check                 # see what tools/keys are available
+./recogun.sh scan example.com      # default recon
 ```
+
+The UI is `recogun <command> <target> [options]`. You pick *what to do* with a
+command, point it at a *target* (RecoGun figures out whether it's a domain, a
+list of domains, or a list of hosts), and tweak with a few options.
+
+## Commands
+
+| Command | What it runs |
+|---|---|
+| `scan <target>` | Default recon — enum → probe → takeover |
+| `full <target>` | Everything — enum, bruteforce, probe, origin, ports, takeover, crawl |
+| `enum <target>` | Only find subdomains |
+| `probe <target>` | enum + httpx (which subdomains are live) |
+| `crawl <target>` | Only crawl (waymore/waybackurls/gau/katana) |
+| `origin <target>` | Only origin-IP-behind-WAF discovery |
+| `ports <target>` | enum + probe + passive port discovery (`naabu -passive`) |
+| `takeover <target>` | enum + probe + subdomain-takeover checks |
+| `run <phases> <target>` | Custom combo, e.g. `run enum,crawl example.com` |
+| `check` | Report which tools/API keys are available, then exit |
+| `update` | Check for a newer RecoGun version, then exit |
+
+Phase names for `run`: `enum`, `bruteforce`, `probe`, `origin`, `ports`,
+`takeover`, `crawl`.
+
+## Targets (auto-detected)
+
+The one target argument is classified automatically:
+
+| You pass | Detected as | Behavior |
+|---|---|---|
+| `example.com` | a domain | scanned directly |
+| a file of bare roots (`example.com`, one per line) | domains file | each enumerated from scratch |
+| a file of full hosts (`api.example.com`, …) | hosts file | split by registered root domain; each root's hosts fed straight into the phases (no re-enum) |
+
+So `recogun crawl hosts.txt -o out/` crawls a mixed list of live hosts and
+writes one `out/<root>.txt` per domain — no flags to remember for input type.
+
+## Options
+
+| Option | Description |
+|---|---|
+| `-o <dir>` | Collect each domain's main output as `<dir>/<root>.txt` (one file per root domain) |
+| `-j <n>` | Max parallel tool jobs (default 8) |
+| `-v` | Verbose — log the actual command run per tool (API keys redacted) |
+| `--scope <file>` | Include-only scope (exact subs or `*.domain.tld`, one per line) |
+| `--oos <file>` | Out-of-scope list (same format) — dropped from results |
+| `--wordlist <file>` | Custom bruteforce wordlist (default: bundled) |
+| `--resolvers <file>` | Custom resolvers list (default: bundled) |
+| `--perms <file>` | Custom permutation wordlist (default: bundled) |
+| `--exclude <t1,t2>` | Skip these tools by name (e.g. `--exclude katana,amass`) |
+
+Every run prints a one-line summary (command, phases, target kind) before it
+starts, so you can see exactly what's about to happen.
 
 ## Methodology (what each phase does)
 
-1. **Passive subdomain enumeration** (parallel, capped by `-j`) — merged,
-   deduped, and scope-filtered.
-2. **Origin IP discovery** (`-o`, opt-in) — domain-level, runs once, not per
-   subdomain. `wafw00f` fingerprints the WAF/CDN; candidate IPs come from
-   VirusTotal historical resolutions, AlienVault OTX, URLScan.io, a Shodan
+1. **enum** — passive subdomain enumeration (parallel, capped by `-j`) across
+   20+ sources; merged, deduped, scope-filtered.
+2. **origin** — origin-IP-behind-WAF discovery, domain-level, runs once.
+   `wafw00f` fingerprints the WAF/CDN; candidate IPs come from VirusTotal
+   historical resolutions, AlienVault OTX, URLScan.io, a Shodan
    `ssl.cert.subject.CN` search, `uncover`, and Shodan favicon-hash search.
    Each candidate gets a direct GET (`curl --resolve`, Host header spoofed)
    compared against the normal response's status + `<title>` — a heuristic,
-   not proof; matches land in `verified_origin_ips.txt` for manual
-   confirmation.
-3. **Permutation + bruteforce** (`-b`, opt-in) — resolvers validated first
-   (dead ones dropped); dnsgen/alterx permutate *from subdomains already
-   found*, resolved via shuffledns; puredns bruteforces a wordlist
-   separately; dnsrecon runs standard enumeration. Re-merged, re-filtered.
-4. **New-subdomains diff** against the previous run, if any.
-5. **HTTP probing** — httpx confirms live hosts, diffed against last run.
-6. **Passive port discovery** (`-p`, opt-in) — `naabu -passive`, no direct
-   scanning of the target.
-7. **Takeover check** — subzy against live subdomains.
-8. **Crawling** (parallel, **opt-in with `-C`** — off by default) — waymore,
-   waybackurls, gau, katana; merged, diffed, deduped with `uro`, split into
-   JS files and API-shaped endpoints. If `paramx` is installed, parameterized
-   URLs are tagged by likely vuln class for triage — classification only, no
-   payloads sent. Once enabled, `-t`/`-e` apply here too (by tool name:
-   `waymore`, `waybackurls`, `gau-crawl`, `katana`), so `-C -e katana` crawls
-   with everything but katana.
-9. **Report** — `report.txt` (human) and `report.json` (machine-readable).
+   not proof; matches land in `verified_origin_ips.txt`.
+3. **bruteforce** — resolvers validated first (dead ones dropped);
+   dnsgen/alterx permutate *from subdomains already found*, resolved via
+   shuffledns; puredns bruteforces a wordlist; dnsrecon runs standard
+   enumeration. Re-merged, re-filtered. Skipped automatically on wildcard DNS.
+4. **probe** — httpx confirms live hosts, diffed against the previous run.
+5. **ports** — `naabu -passive`, no direct scanning of the target.
+6. **takeover** — subzy against live subdomains.
+7. **crawl** — waymore, waybackurls, gau, katana (parallel); merged, diffed,
+   deduped with `uro`, split into JS files and API-shaped endpoints. If
+   `paramx` is installed, parameterized URLs are tagged by likely vuln class
+   for triage — classification only, no payloads sent.
 
-## Flag reference
-
-| Flag | Description |
-|---|---|
-| `-d <domain>` | Scan a single domain |
-| `-l <file>` | Scan multiple domains, one per line |
-| `-t <tools>` | Only run these sources (comma separated) — covers passive-enum **and** crawling tool names |
-| `-e <tools>` | Exclude these sources (comma separated) — e.g. `-e katana` skips just katana |
-| `-C` | Enable the crawling phase (waymore/waybackurls/gau-crawl/katana) — off by default |
-| `-x <file>` | Out-of-scope file — drop matching subdomains |
-| `-i <file>` | Include-only file — restrict to matching subdomains |
-| `-b` | DNS permutation (dnsgen/alterx/shuffledns) + wordlist bruteforce (puredns) |
-| `-w <file>` | Custom wordlist for `-b` (default: bundled `wordlists/subdomains.txt`) |
-| `-r <file>` | Custom resolvers for `-b` (default: bundled `resolvers.txt`) |
-| `-m <file>` | Custom permutation wordlist for `-b` (default: bundled `wordlists/permutations.txt`) |
-| `-p` | Passive port discovery (`naabu -passive`) |
-| `-o` | Origin IP discovery behind WAF/CDN |
-| `--only <phases>` | Run ONLY these phases (comma sep): `enum,bruteforce,probe,origin,ports,takeover,crawl` |
-| `-f <file>` | Host list to feed a phase run via `--only` when enum/probe aren't in the list; with no `-d`/`-l`, auto-splits by root domain |
-| `-O <dir>` | Collect each domain's primary output into `<dir>/<root>.txt` (one file per root domain) |
-| `-j <n>` | Max concurrent tool jobs (default 8) |
-| `-v` | Verbose — log the actual command run per tool (API keys redacted) |
-| `-c` | Report available tools/keys, then exit |
-| `-u` | Check for a newer RecoGun version now, then exit |
-| `-h` | Usage |
-
-Every run prints a config summary (target, which optional phases are on,
-scope files, parallel jobs) before scanning starts — so you always know
-exactly what a given invocation is about to do without re-reading flags.
+Every run also writes `report.txt` (human) and `report.json` (machine-readable),
+and diffs subdomains / active hosts / URLs against the previous run for the
+same domain (new-since-last-scan, no flag needed).
 
 ## Bundled defaults (wordlists & resolvers)
 
-Three files ship in the repo so `-b` is usable straight after cloning, with
-no extra downloads:
+Three files ship in the repo so `full`/`bruteforce` work straight after
+cloning, with no extra downloads:
 
 - `resolvers.txt` — 21 major public resolvers
 - `wordlists/subdomains.txt` — SecLists' `subdomains-top1million-5000` (5,000 entries), used by `puredns` for wordlist bruteforce
-- `wordlists/permutations.txt` — [six2dez/OneListForAll](https://github.com/six2dez/OneListForAll)'s `permutations_short.txt` (1,069 entries — `dev`, `staging`, `api`, `www1`-`www7`, etc.), used by `dnsgen -w` and (only if you pass `-m`) `alterx -pp word=`
+- `wordlists/permutations.txt` — [six2dez/OneListForAll](https://github.com/six2dez/OneListForAll)'s `permutations_short.txt` (1,069 entries — `dev`, `staging`, `api`, `www1`-`www7`, etc.), used by `dnsgen` and (only with `--perms`) `alterx`
 
 All three resolve relative to the script's own location, not your current
-directory, so this works no matter where you run RecoGun from. Pass
-`-w`/`-r`/`-m` to use your own instead; nothing needs to change in the repo.
+directory, so they work no matter where you run RecoGun from. Pass
+`--wordlist`/`--resolvers`/`--perms` to use your own instead.
 
-**Note on `-m`:** without it, `alterx` runs with `-en` (enrichment — *adds*
-words pulled from your already-found subdomains on top of its own curated
-list). `alterx`'s built-in word list is purpose-built for its DSL patterns,
-so RecoGun doesn't silently swap it out for a generic wordlist — `-m` only
-takes effect for `alterx` if you explicitly pass it, in which case it
-replaces alterx's `word` payload outright (`-pp word=<file>`).
+**Note on `--perms`:** without it, `alterx` runs with `-en` (enrichment —
+*adds* words pulled from your already-found subdomains on top of its own
+curated list). `alterx`'s built-in word list is purpose-built for its DSL
+patterns, so RecoGun doesn't silently swap it out for a generic wordlist —
+`--perms` only replaces alterx's `word` payload outright when you pass it.
 
 ## Feature guides
 
-### Running individual phases (`--only`)
+### Crawl a list of hosts you already have
 
-By default a run does passive-enum + probe + takeover (plus whatever opt-in
-flags add). `--only` runs *exactly* the phases you name and nothing else:
-
-```bash
-./recogun.sh -d target.com --only enum              # just gather subdomains
-./recogun.sh -d target.com --only origin            # just origin-IP discovery
-./recogun.sh -d target.com --only takeover,ports    # a couple of phases
-```
-
-Phase names: `enum`, `bruteforce`, `probe`, `origin`, `ports`, `takeover`,
-`crawl`.
-
-Some phases *consume* a live-host list rather than produce one (`crawl`,
-`takeover`, `ports`). If you run one of those without `enum` or `probe` in
-the same `--only` list, supply the hosts yourself with `-f`:
+Point `crawl` at a file of live hosts. RecoGun groups them by registered
+root domain (public-suffix aware via `tldextract`) and crawls each root
+separately. Add `-o <dir>` to get one output file per domain:
 
 ```bash
-# Crawl a list of hosts you already have - no enum, no httpx
-./recogun.sh -d target.com --only crawl -f my_live_hosts.txt
-
-# Just re-check an existing host list for takeovers
-./recogun.sh -d target.com --only takeover -f active_subdomains.txt
-```
-
-RecoGun refuses to start (rather than silently doing nothing) if a
-host-consuming phase has no way to get hosts. Note the `crawl`/`takeover`/
-`ports` phases still archive-crawl / query the same external services as
-always, so they're subject to the same rate limits described under
-Troubleshooting.
-
-#### Auto-split a mixed host list by root domain (`-f` alone + `-O`)
-
-If your `-f` file mixes hosts from several root domains and you pass no
-`-d`/`-l`, RecoGun groups the hosts by registered root domain (public-suffix
-aware via `tldextract`) and runs each root as its own target. Add `-O <dir>`
-to collect each domain's primary output — deepest phase that ran: crawl URLs
-> active hosts > all subdomains — as one `<root>.txt` per domain:
-
-```bash
-# hosts.txt contains *.shutterfly.com and *.shutterfly.net hosts, mixed
-./recogun.sh -f hosts.txt --only crawl -C -O out/
+# hosts.txt mixes *.shutterfly.com and *.shutterfly.net hosts
+recogun crawl hosts.txt -o out/
 # => out/shutterfly.com.txt  and  out/shutterfly.net.txt
 ```
 
-`-O` works with any run, not just auto-split — e.g. `-l domains.txt -C -O out/`
-drops one crawl file per domain into `out/` alongside the usual
-`results/<domain>_<timestamp>/` folders.
+The same works for `takeover` or `ports` on an existing host list. `-o`
+also works on any command — e.g. `recogun enum domains.txt -o subs/` drops
+one subdomain file per domain into `subs/`.
 
-### Scope files (`-x` / `-i`)
+### Scope files (`--scope` / `--oos`)
 
 One entry per line, `#` for comments:
 
@@ -213,9 +170,9 @@ example.com          # exact match
 *.dev.example.com     # wildcard - base domain and any subdomain of it
 ```
 
-`-i` (include) is applied first as a whitelist, `-x` (exclude/OOS) after.
-Both re-apply following the bruteforce/permutation phase, since that phase
-can generate names outside your intended scope.
+`--scope` (include) is applied first as a whitelist, `--oos` (exclude) after.
+Both re-apply following bruteforce, since that phase can generate names
+outside your intended scope.
 
 ### Incremental scans
 
@@ -223,42 +180,26 @@ If a previous `results/<domain>_*` run exists, RecoGun automatically diffs
 against the most recent one and reports `new_subdomains.txt`,
 `new_active_subdomains.txt`, and `crawling/new_urls.txt` — the actual new
 attack surface since last time, not the full list again. No flag needed;
-just re-run the same domain periodically, e.g. from cron:
+just re-run the same target periodically, e.g. from cron:
 
 ```bash
-0 */6 * * * cd /path/to/RecoGun && ./recogun.sh -d target.com >> cron.log 2>&1
+0 */6 * * * cd /path/to/RecoGun && ./recogun.sh scan target.com >> cron.log 2>&1
 ```
 
-### Multi-domain progress (`-l`)
+### Multi-domain progress
 
-Each domain in the list gets a `[N/Total]` prefix on its start/summary/done
-lines, so a long list running unattended shows exactly where it is:
+When the target is a file (of domains or hosts), each one gets a `[N/Total]`
+prefix on its start/summary/done lines, so a long list running unattended
+shows exactly where it is, and a final banner reports which domains (if any)
+had takeovers or tool errors across the whole run.
 
-```
-[3/10] [*] Processing domain: example.com
-[3/10] === SCAN SUMMARY: example.com ===
-[3/10] [DONE] example.com
-```
+### Auto-update check (`update`)
 
-After the whole list finishes, a final banner reports which domains (if
-any) had takeovers or tool errors, across the entire run:
-
-```
-  +=========================================+
-  |   ALL 10 DOMAIN(S) COMPLETE
-  +=========================================+
-Takeovers found on: example.com internal.example.com
-```
-
-### Auto-update check (`-u`)
-
-Every run auto-checks for updates (`git fetch`, 10s timeout) before
-scanning. In a real terminal, it asks `[y/N]` before pulling; in a
-non-interactive session (cron, CI) it never prompts — it just logs that an
-update exists and continues with the current version, so automated runs
-can never hang waiting on stdin that will never arrive. `git pull` on
-"yes" then exits rather than trying to hot-swap the running script. Run
-`-u` on its own to check on demand, with explicit feedback either way.
+Every run auto-checks for updates (`git fetch`, 10s timeout) before scanning.
+In a real terminal, it asks `[y/N]` before pulling; in a non-interactive
+session (cron, CI) it never prompts — it just logs that an update exists and
+continues with the current version, so automated runs can never hang waiting
+on stdin that will never arrive. Run `recogun update` to check on demand.
 
 ## Output layout
 
@@ -278,7 +219,7 @@ results/<domain>_<timestamp>/
 ├── active_subdomains.txt
 ├── new_subdomains.txt / new_active_subdomains.txt   (vs. previous run)
 ├── takeovers.txt              (only if subzy found something)
-├── naabu.txt                  (-p)
+├── naabu.txt                  (ports)
 ├── recogun.log
 ├── report.txt
 └── report.json
@@ -303,19 +244,42 @@ CRAWL_TIMEOUT_SECONDS=3600   # default is 1800 (30 min)
 This is separate from `TIMEOUT_SECONDS`, which stays short (default 300s)
 for the quick API-based passive-enum sources.
 
-### `-b` takes 24h on one domain, httpx never finishes
+### `bruteforce` takes 24h on one domain, httpx never finishes
 
 This is wildcard DNS, not a performance bug. If `*.domain.tld` resolves to
 *something* for any subdomain you query, every single wordlist/permutation
-guess in the bruteforce phase "succeeds" as a false positive — the candidate
-list explodes to the size of your wordlist, and `httpx` then has to probe
-all of it one by one. RecoGun checks for this automatically before running
-`-b`: two random, near-certainly-nonexistent subdomains are resolved, and if
-both answer, the whole permutation/bruteforce phase is skipped for that
-domain with a loud warning instead of silently producing garbage. `httpx`
-itself also runs with explicit concurrency (`HTTPX_THREADS`, default 100)
-and a 5s per-host timeout, and logs a warning if more than 20,000
-subdomains get queued for probing regardless of cause.
+guess "succeeds" as a false positive — the candidate list explodes to the
+size of your wordlist, and `httpx` then has to probe all of it one by one.
+RecoGun checks for this automatically before running the bruteforce phase:
+two random, near-certainly-nonexistent subdomains are resolved, and if both
+answer, the phase is skipped for that domain with a loud warning instead of
+silently producing garbage. `httpx` also runs with explicit concurrency
+(`HTTPX_THREADS`, default 100) and a 5s per-host timeout, and logs a warning
+if more than 20,000 subdomains get queued for probing regardless of cause.
+
+## Migrating from v5
+
+v6 replaced the flag soup with subcommands. Old commands no longer work —
+here's the translation:
+
+| Old (v5) | New (v6) |
+|---|---|
+| `-d example.com` | `scan example.com` |
+| `-d example.com -b -p -o -C` | `full example.com` |
+| `-l domains.txt` | `scan domains.txt` |
+| `-d example.com --only enum` | `enum example.com` |
+| `--only crawl -f hosts.txt -O out/` | `crawl hosts.txt -o out/` |
+| `-d x --only takeover` | `takeover x` |
+| `-x oos.txt -i in.txt` | `--oos oos.txt --scope in.txt` |
+| `-e katana` | `--exclude katana` |
+| `-w / -r / -m <file>` | `--wordlist / --resolvers / --perms <file>` |
+| `-c` | `check` |
+| `-u` | `update` |
+| `-O <dir>` (capital) | `-o <dir>` (there's only one `-o` now, always a folder) |
+
+Note `-o` changed meaning: in v5 lowercase `-o` was origin-IP discovery
+(now the `origin` command) and capital `-O` was output. In v6 there's a
+single `-o <dir>` = output folder.
 
 ## Architecture notes
 
@@ -324,12 +288,9 @@ subdomains get queued for probing regardless of cause.
 - `run_tools_parallel` takes an array of `"name:command"` pairs and a target
   directory, fanning them out with a `PARALLEL_JOBS` concurrency cap
   (default 8, override with `-j` or `PARALLEL_JOBS` in `config.env`).
-- Fixed from earlier versions: the old `-br` bruteforce flag never triggered
-  (`getopts` only returns single characters, so `br)` was dead code — now
-  `-b`). Permutation tooling used to run *before* the first subdomain merge,
-  so it had nothing to permutate — it now runs after. Per-tool logs used to
-  split across `sources/`, `bruteforce/`, `crawling/` subdirs instead of one
-  log — now unified into a single `recogun.log` per run.
+- The subcommand layer is thin: each command just maps to an explicit phase
+  list, and the same `process_domain` engine runs those phases. Adding a
+  command is one line in `set_phases_for_command`.
 
 ## Credential hygiene
 
