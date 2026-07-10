@@ -416,29 +416,115 @@ analyze_js() {
       "sourcemaps|(sourceMappingURL=[A-Za-z0-9._/-]+\.map|//# sourceMappingURL)"
     )
 
+    # Findings live in a subfolder so the category files don't clutter the
+    # analysis dir root (which also holds the external-tool outputs + reports).
+    local find_dir="$out_dir/findings"
+    mkdir -p "$find_dir"
+
     local summary="$out_dir/_SUMMARY.txt"
+    local findings_md="$out_dir/_FINDINGS.md"
     : > "$summary"
+    : > "$findings_md"
+
+    # High-signal categories bubble to the top of _FINDINGS.md so the stuff
+    # worth looking at first (secrets, keys, tokens) isn't buried in noise.
+    local HIGH_SIGNAL_RX='^(secrets_|cloud_|auth_|infra_internal)'
+
     {
         echo "=== RecoGun JS Analysis Summary ==="
         echo "Files analyzed: $count"
         echo "Generated: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "Per-category detail: findings/<category>.txt"
+        echo "Prioritized view:    _FINDINGS.md"
         echo ""
-        printf "%-32s %s\n" "CATEGORY" "HITS"
-        printf "%-32s %s\n" "--------" "----"
+        printf "%-34s %6s\n" "CATEGORY" "HITS"
+        printf "%-34s %6s\n" "--------" "----"
     } >> "$summary"
+
+    # Two-pass: collect category->count first so _FINDINGS.md can list the
+    # high-signal hits before the bulk, then render both reports.
+    local -a hi_lines=() lo_lines=()
 
     for entry in "${PATTERNS[@]}"; do
         local cat="${entry%%|*}"
         local rx="${entry#*|}"
-        local of="$out_dir/${cat}.txt"
-        # -h no filename, -o only match, -i case-insensitive, -E extended
-        grep -rhoiE "$rx" $files 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sort -u > "$of"
-        if [ -s "$of" ]; then
-            printf "%-32s %s\n" "$cat" "$(wc -l < "$of")" >> "$summary"
+        local of="$find_dir/${cat}.txt"
+
+        # Per-file so we can attribute each hit to its source JS. grep -oiE gives
+        # only the matched value; we prefix the (basename of the) source file so
+        # the category file is actually readable, not a context-free blob.
+        : > "$of.tmp"
+        local f
+        for f in $files; do
+            grep -hoiE "$rx" "$f" 2>/dev/null \
+                | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+                | sort -u \
+                | sed "s#^#$(basename "$f")\t#"
+        done > "$of.tmp"
+
+        local hits
+        hits=$(wc -l < "$of.tmp" | tr -d ' ')
+        if [ "$hits" -gt 0 ]; then
+            # Readable category file: header + aligned "value  <-  source.js" rows,
+            # values grouped so the same finding across many files collapses.
+            {
+                echo "# $cat"
+                echo "# $hits occurrence(s) across the analyzed JS. Format: VALUE <TAB> source file"
+                echo "# ---------------------------------------------------------------"
+                # value-first, then its source(s), sorted by value
+                awk -F'\t' '{ v[$2]=v[$2] (v[$2]?", ":"") $1 } END { for (k in v) print k "\t<-  " v[k] }' "$of.tmp" \
+                    | sort
+            } > "$of"
+            rm -f "$of.tmp"
+
+            local uniq_vals
+            uniq_vals=$(grep -vc '^#' "$of")
+            printf "%-34s %6s\n" "$cat" "$uniq_vals" >> "$summary"
+
+            if [[ "$cat" =~ $HIGH_SIGNAL_RX ]]; then
+                hi_lines+=("$cat|$uniq_vals")
+            else
+                lo_lines+=("$cat|$uniq_vals")
+            fi
         else
-            rm -f "$of"
+            rm -f "$of.tmp"
         fi
     done
+
+    # --- Human-first prioritized report ---
+    {
+        echo "# JS Analysis — Prioritized Findings"
+        echo ""
+        echo "**Files analyzed:** $count  |  **Generated:** $(date '+%Y-%m-%d %H:%M:%S')"
+        echo ""
+        echo "Full per-category detail is in \`findings/<category>.txt\`."
+        echo ""
+        if [ ${#hi_lines[@]} -gt 0 ]; then
+            echo "## 🔴 High signal — review first"
+            echo ""
+            echo "| Category | Unique hits | File |"
+            echo "|---|---:|---|"
+            local l
+            for l in "${hi_lines[@]}"; do
+                printf "| %s | %s | \`findings/%s.txt\` |\n" "${l%%|*}" "${l#*|}" "${l%%|*}"
+            done
+            echo ""
+        fi
+        if [ ${#lo_lines[@]} -gt 0 ]; then
+            echo "## Everything else"
+            echo ""
+            echo "| Category | Unique hits | File |"
+            echo "|---|---:|---|"
+            local l
+            for l in "${lo_lines[@]}"; do
+                printf "| %s | %s | \`findings/%s.txt\` |\n" "${l%%|*}" "${l#*|}" "${l%%|*}"
+            done
+            echo ""
+        fi
+        if [ ${#hi_lines[@]} -eq 0 ] && [ ${#lo_lines[@]} -eq 0 ]; then
+            echo "_No findings matched any category._"
+        fi
+    } >> "$findings_md"
 
     # --- External specialist tools, used when installed (graceful skip) ---
     # These complement the built-in regex pass with maintained rule sets.
@@ -467,7 +553,7 @@ analyze_js() {
         [ -s "$out_dir/_endext.txt" ] && { sort -u "$out_dir/_endext.txt" -o "$out_dir/_endext.txt"; printf "%-32s %s\n" "endext_endpoints" "$(wc -l < "$out_dir/_endext.txt")" >> "$summary"; }
     fi
 
-    log_message "[OK] JS analysis complete - see $out_dir/_SUMMARY.txt" "$GREEN"
+    log_message "[OK] JS analysis complete - open $out_dir/_FINDINGS.md (prioritized) or _SUMMARY.txt" "$GREEN"
 }
 
 # Apply -t/-e (TOOLS_TO_RUN/TOOLS_TO_EXCLUDE) to any "name:command" array -
@@ -1099,15 +1185,53 @@ process_domain() {
                 urls_for_tagging="$domain_output_dir/crawling/filtered_urls.txt"
             fi
 
-            # Categorize parameterized URLs by likely vuln class - classification
-            # only, no payloads are sent.
-            if command -v paramx &>/dev/null && [ -s "$urls_for_tagging" ]; then
-                log_message "[+] Tagging parameterized URLs with paramx..." "$BLUE"
-                mkdir -p "$domain_output_dir/crawling/paramx"
-                for tag in xss sqli lfi rce idor ssrf ssti redirect; do
-                    paramx -tag "$tag" < "$urls_for_tagging" > "$domain_output_dir/crawling/paramx/${tag}.txt" 2>>"$CURRENT_LOG"
-                    [ -s "$domain_output_dir/crawling/paramx/${tag}.txt" ] || rm -f "$domain_output_dir/crawling/paramx/${tag}.txt"
+            # Categorize parameterized URLs by likely vuln class with gf -
+            # classification only, no payloads are sent. One file per pattern,
+            # named <pattern>-param.txt (e.g. xss-param.txt, sqli-param.txt).
+            if command -v gf &>/dev/null && [ -s "$urls_for_tagging" ]; then
+                log_message "[+] Tagging parameterized URLs with gf..." "$BLUE"
+                local gf_dir="$domain_output_dir/crawling/gf"
+                mkdir -p "$gf_dir"
+
+                # Only run patterns the user actually has installed in ~/.gf.
+                local available_patterns
+                available_patterns=$(gf -list 2>/dev/null)
+
+                # Vuln-class patterns of interest, mapped to friendly filenames.
+                # gf pattern name  ->  output file stem
+                local -a GF_PATTERNS=(
+                    "xss|xss"
+                    "sqli|sqli"
+                    "lfi|lfi"
+                    "rce|rce"
+                    "idor|idor"
+                    "ssrf|ssrf"
+                    "ssti|ssti"
+                    "redirect|open-redirect"
+                    "interestingparams|interesting-params"
+                    "interestingEXT|interesting-ext"
+                    "debug_logic|debug-logic"
+                )
+                local tagged=0 pat_entry pat stem outf
+                for pat_entry in "${GF_PATTERNS[@]}"; do
+                    pat="${pat_entry%%|*}"
+                    stem="${pat_entry#*|}"
+                    # Skip patterns this box doesn't have installed.
+                    printf '%s\n' "$available_patterns" | grep -qxF "$pat" || continue
+                    outf="$gf_dir/${stem}-param.txt"
+                    gf "$pat" < "$urls_for_tagging" 2>>"$CURRENT_LOG" | sort -u > "$outf"
+                    if [ -s "$outf" ]; then
+                        log_message "    [gf] ${stem}-param.txt: $(count_unique_results "$outf") URLs" "$CYAN"
+                        tagged=$((tagged + 1))
+                    else
+                        rm -f "$outf"
+                    fi
                 done
+                if [ "$tagged" -eq 0 ]; then
+                    log_message "[!] gf produced no tagged URLs (no matching patterns in ~/.gf, or no param URLs). Install patterns: https://github.com/1ndianl33t/Gf-Patterns" "$YELLOW"
+                fi
+            elif ! command -v gf &>/dev/null; then
+                log_message "[i] gf not installed - skipping parameter tagging (install: go install github.com/tomnomnom/gf@latest + Gf-Patterns)" "$YELLOW"
             fi
         else
             log_message "[!] No crawling results found" "$YELLOW"
@@ -1163,19 +1287,27 @@ process_domain() {
         fi
         if [ -d "$js_src_dir" ] && [ -n "$(find "$js_src_dir" -maxdepth 1 -name '*.js' 2>/dev/null)" ]; then
             analyze_js "$js_src_dir" "$domain_output_dir/js_analysis"
-            # Historical diff: which findings are NEW vs the previous scan.
-            if [[ -n "$PREV_DIR" && -d "$PREV_DIR/js_analysis" ]]; then
+            # Historical diff: which finding VALUES are NEW vs the previous scan.
+            # Category files now live under findings/ and carry a "value<TAB>source"
+            # format, so we diff on the value column only (ignore # header lines
+            # and source attribution, which change run-to-run without the finding
+            # itself being new).
+            local cur_find="$domain_output_dir/js_analysis/findings"
+            local prev_find="$PREV_DIR/js_analysis/findings"
+            if [[ -n "$PREV_DIR" && -d "$prev_find" ]]; then
                 mkdir -p "$domain_output_dir/js_analysis/new"
-                for cf in "$domain_output_dir/js_analysis"/*.txt; do
+                for cf in "$cur_find"/*.txt; do
                     [ -f "$cf" ] || continue
                     local bn; bn=$(basename "$cf")
-                    [[ "$bn" == _* ]] && continue
-                    if [ -f "$PREV_DIR/js_analysis/$bn" ]; then
-                        comm -13 <(sort -u "$PREV_DIR/js_analysis/$bn") <(sort -u "$cf") > "$domain_output_dir/js_analysis/new/$bn"
-                        [ -s "$domain_output_dir/js_analysis/new/$bn" ] || rm -f "$domain_output_dir/js_analysis/new/$bn"
+                    local newf="$domain_output_dir/js_analysis/new/$bn"
+                    if [ -f "$prev_find/$bn" ]; then
+                        comm -13 \
+                            <(grep -v '^#' "$prev_find/$bn" 2>/dev/null | cut -f1 | sort -u) \
+                            <(grep -v '^#' "$cf" 2>/dev/null | cut -f1 | sort -u) > "$newf"
                     else
-                        cp "$cf" "$domain_output_dir/js_analysis/new/$bn"
+                        grep -v '^#' "$cf" 2>/dev/null | cut -f1 | sort -u > "$newf"
                     fi
+                    [ -s "$newf" ] || rm -f "$newf"
                 done
                 [ -n "$(ls -A "$domain_output_dir/js_analysis/new" 2>/dev/null)" ] && \
                     log_message "[i] New JS findings since last scan in js_analysis/new/" "$CYAN"
@@ -1231,9 +1363,9 @@ process_domain() {
             echo ""
         fi
 
-        if [ -d "$domain_output_dir/crawling/paramx" ] && [ "$(ls -A "$domain_output_dir/crawling/paramx" 2>/dev/null)" ]; then
-            echo "=== Parameter Triage (paramx) ==="
-            for f in "$domain_output_dir/crawling/paramx"/*.txt; do
+        if [ -d "$domain_output_dir/crawling/gf" ] && [ "$(ls -A "$domain_output_dir/crawling/gf" 2>/dev/null)" ]; then
+            echo "=== Parameter Triage (gf) ==="
+            for f in "$domain_output_dir/crawling/gf"/*.txt; do
                 echo "$(basename "$f" .txt): $(count_unique_results "$f") URLs"
             done
             echo ""
@@ -1376,7 +1508,7 @@ check_dependencies() {
     _dep_check "Crawling" katana ""
     _dep_check "Crawling" hakrawler ""
     _dep_check "Crawling" uro ""
-    _dep_check "Crawling" paramx ""
+    _dep_check "Crawling" gf ""
 
     _dep_check "Parameter discovery (params)" arjun ""
 
@@ -1645,7 +1777,7 @@ check_for_updates
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v6.4                |"
+echo "  |              RecoGun v6.5                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  |                 by $OPERATOR                 |"
 echo "  +=========================================+"

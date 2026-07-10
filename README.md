@@ -119,9 +119,10 @@ starts, so you can see exactly what's about to happen.
 6. **takeover** — subzy against live subdomains.
 7. **crawl** — waymore, waybackurls, gau, urlfinder, katana, hakrawler
    (parallel); merged, diffed, deduped with `uro`, split into JS files and
-   API-shaped endpoints. If `paramx` is installed, parameterized URLs are
-   tagged by likely vuln class for triage — classification only, no payloads
-   sent. JS URLs are also **downloaded** into `js_files/` and passed to
+   API-shaped endpoints. If `gf` is installed, parameterized URLs are tagged by
+   likely vuln class into `crawling/gf/<class>-param.txt` (e.g. `xss-param.txt`,
+   `sqli-param.txt`, `open-redirect-param.txt`) for triage — classification
+   only, no payloads sent. JS URLs are also **downloaded** into `js_files/` and passed to
    jsanalysis. During the run you get live `[done/total]` progress with each
    tool's elapsed time and result count.
 8. **jsanalysis** — full JavaScript intelligence over the downloaded JS
@@ -167,9 +168,15 @@ recogun crawl example.com          # crawl, download JS, then analyze it
 recogun js js_urls.txt             # analyze a list of .js URLs directly
 ```
 
-Output lands in `results/<domain>_<ts>/js_analysis/` — one `.txt` per
-category plus `_SUMMARY.txt` with hit counts. Findings that are new versus
-the previous scan are mirrored into `js_analysis/new/`.
+Output lands in `results/<domain>_<ts>/js_analysis/`:
+
+- **`_FINDINGS.md`** — prioritized report; high-signal categories (secrets,
+  cloud, auth, internal hosts) surfaced first. **Start here.**
+- **`_SUMMARY.txt`** — category → unique-hit-count table.
+- **`findings/<category>.txt`** — per-category detail. Each line is the matched
+  value followed by the source JS file(s) it came from (`VALUE <TAB> <-  a.js, b.js`),
+  so a finding is traceable to its file instead of being a context-free blob.
+- **`js_analysis/new/`** — finding values that are new versus the previous scan.
 
 Categories extracted (built-in regex engine, ~60 categories):
 
@@ -295,7 +302,14 @@ results/<domain>_<timestamp>/
 │   ├── javascript_files.txt
 │   ├── api_endpoints.txt
 │   ├── new_urls.txt           (vs. previous run)
-│   └── paramx/{xss,sqli,...}.txt
+│   └── gf/{xss,sqli,open-redirect,...}-param.txt   (gf triage)
+├── js_files/                  downloaded .js content (from crawl)
+├── js_analysis/
+│   ├── _FINDINGS.md           prioritized report — start here
+│   ├── _SUMMARY.txt           category -> hit-count table
+│   ├── findings/<category>.txt   value <-  source .js
+│   └── new/                   findings new vs. previous run
+├── parameters.json            hidden params (Arjun, params phase)
 ├── final_subdomains.txt
 ├── active_subdomains.txt
 ├── new_subdomains.txt / new_active_subdomains.txt   (vs. previous run)
