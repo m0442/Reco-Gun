@@ -149,24 +149,56 @@ redact_command() {
 # Run a tool, capture its output, log the result. Errors go to a file
 # (not an in-memory array) so this stays safe to call from parallel
 # subshells. Never lets one bad tool kill the run.
+# Optional 5th/6th args (used by run_tools_parallel) drive a live "[done/total]"
+# progress tag: a counter file to atomically increment, and the total tool count.
 run_tool() {
     local tool_name="$1"
     local command="$2"
     local output_file="$3"
     local tool_timeout="${4:-$TIMEOUT_SECONDS}"
+    local counter_file="${5:-}"
+    local total="${6:-}"
+
+    local start_ts end_ts elapsed
+    start_ts=$(date +%s)
 
     log_message "[+] Running $tool_name..." "$BLUE"
     $VERBOSE && log_message "    -> $(redact_command "$command")" "$CYAN"
-    if timeout "$tool_timeout" bash -c "$command" > "$output_file" 2>> "$CURRENT_LOG"; then
+
+    local rc=0
+    timeout "$tool_timeout" bash -c "$command" > "$output_file" 2>> "$CURRENT_LOG" || rc=$?
+
+    end_ts=$(date +%s)
+    elapsed=$(( end_ts - start_ts ))
+
+    # Live progress: record this completion and render [done/total]. Each tool
+    # runs in its own background subshell, so we can't share a shell variable -
+    # instead every finisher appends one line and the done-count is the line
+    # count. A single `>>` write of a short line is atomic on POSIX, so no lock
+    # is needed (and no dependency on flock, which isn't everywhere).
+    local prog=""
+    if [ -n "$counter_file" ] && [ -n "$total" ]; then
+        echo "$tool_name" >> "$counter_file"
+        local done
+        done=$(wc -l < "$counter_file" 2>/dev/null | tr -d ' ')
+        prog="[${done}/${total}] "
+    fi
+
+    if [ "$rc" -eq 0 ]; then
         if [ -s "$output_file" ]; then
             local count
             count=$(count_unique_results "$output_file")
-            log_message "[OK] $tool_name completed. Found $count results" "$GREEN"
+            log_message "${prog}[OK] $tool_name done in ${elapsed}s - $count results" "$GREEN"
         else
-            log_message "[!] $tool_name completed but no results found." "$YELLOW"
+            log_message "${prog}[!] $tool_name done in ${elapsed}s - no results" "$YELLOW"
         fi
     else
-        log_message "[X] Error in $tool_name. Skipping to the next tool..." "$RED"
+        # 124 is timeout(1)'s exit code for the timeout expiring.
+        if [ "$rc" -eq 124 ]; then
+            log_message "${prog}[X] $tool_name TIMED OUT after ${tool_timeout}s - skipping" "$RED"
+        else
+            log_message "${prog}[X] $tool_name failed (exit $rc) after ${elapsed}s - skipping" "$RED"
+        fi
         echo "$tool_name" >> "$CURRENT_ERRORS"
         rm -f "$output_file"
         return 1
@@ -180,15 +212,31 @@ run_tools_parallel() {
     local output_dir="$2"
     local job_timeout="${3:-$TIMEOUT_SECONDS}"
 
+    local total="${#tools_ref[@]}"
+    [ "$total" -eq 0 ] && return 0
+
+    # Shared [done/total] counter for the live progress tags: each finishing
+    # tool appends one line, done-count = line count. Start empty (0 lines).
+    local counter_file="$output_dir/.progress"
+    : > "$counter_file"
+
+    # Announce the line-up up front so you know what's about to run in parallel.
+    local names=()
+    for tool in "${tools_ref[@]}"; do names+=("${tool%%:*}"); done
+    log_message "[*] Launching $total tool(s) in parallel (max $PARALLEL_JOBS at once): ${names[*]}" "$CYAN"
+
     for tool in "${tools_ref[@]}"; do
         local tool_name="${tool%%:*}"
         local tool_command="${tool#*:}"
-        run_tool "$tool_name" "$tool_command" "$output_dir/${tool_name}.txt" "$job_timeout" &
+        run_tool "$tool_name" "$tool_command" "$output_dir/${tool_name}.txt" "$job_timeout" "$counter_file" "$total" &
         while [ "$(jobs -r -p | wc -l)" -ge "$PARALLEL_JOBS" ]; do
             wait -n
         done
     done
     wait
+
+    rm -f "$counter_file" "$counter_file.lock"
+    log_message "[*] All $total tool(s) finished" "$CYAN"
 }
 
 merge_results() {
@@ -991,10 +1039,16 @@ process_domain() {
     fi
 
     # ---- Phase 6: crawling (parallel, opt-in with -C) ----
+    # If nothing upstream produced a host list (e.g. `crawl example.com` with no
+    # enum/probe), seed it from the bare domain so passive crawlers still run.
+    if optin_phase_runs crawl "$CRAWLING" && [ ! -s "$ACTIVE_SUBDOMAINS" ]; then
+        printf '%s\n' "$domain" > "$ACTIVE_SUBDOMAINS"
+        log_message "[i] No host list upstream - seeding crawl with the bare domain: $domain" "$CYAN"
+    fi
     if ! optin_phase_runs crawl "$CRAWLING"; then
         log_message "[i] Crawling phase skipped (enable with -C)" "$YELLOW"
     elif [ -s "$ACTIVE_SUBDOMAINS" ]; then
-        log_message "[*] Running crawling tools..." "$BLUE"
+        log_message "[*] Crawling $(count_unique_results "$ACTIVE_SUBDOMAINS") host(s) - passive URL discovery + JS collection" "$BLUE"
 
         # These process every active subdomain (can be hundreds), so they need
         # real internal concurrency, not just the outer parallel-tools job
@@ -1022,6 +1076,9 @@ process_domain() {
 
             grep -E '\.js(\?|$)' "$crawl_final" > "$domain_output_dir/crawling/javascript_files.txt" 2>/dev/null
             grep -E '(/api/|/v[0-9]+/|\.json|/graphql)' "$crawl_final" > "$domain_output_dir/crawling/api_endpoints.txt" 2>/dev/null
+
+            # Final crawl status readout.
+            log_message "[=] Crawl results: $(count_unique_results "$crawl_final") URLs | $(count_unique_results "$domain_output_dir/crawling/javascript_files.txt") JS files | $(count_unique_results "$domain_output_dir/crawling/api_endpoints.txt") API endpoints" "$GREEN"
 
             # Auto-download JS content so the jsanalysis phase (and you) have
             # the actual files, not just URLs. Parallel, capped, deduped by a
@@ -1533,7 +1590,7 @@ check_for_updates
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v6.2                |"
+echo "  |              RecoGun v6.3                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  |                 by $OPERATOR                 |"
 echo "  +=========================================+"
