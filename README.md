@@ -53,11 +53,12 @@ list of domains, or a list of hosts), and tweak with a few options.
 | Command | What it runs |
 |---|---|
 | `scan <target>` | Default recon — enum → probe → takeover |
-| `full <target>` | Everything — enum, bruteforce, probe, origin, ports, takeover, crawl, jsanalysis |
+| `full <target>` | Everything — enum, bruteforce, probe, origin, ports, takeover, crawl, jsanalysis, params |
 | `enum <target>` | Only find subdomains |
 | `probe <target>` | enum + httpx (which subdomains are live) |
-| `crawl <target>` | Crawl (waymore/waybackurls/gau/katana) + download & analyze JS |
+| `crawl <target>` | Crawl (waymore/waybackurls/gau/urlfinder/katana/hakrawler) + download & analyze JS |
 | `js <jsurls.txt>` | Only JS intelligence analysis on a list of `.js` URLs |
+| `params <target>` | Crawl, then probe URLs for hidden parameters (Arjun — **active**) |
 | `origin <target>` | Only origin-IP-behind-WAF discovery |
 | `ports <target>` | enum + probe + passive port discovery (`naabu -passive`) |
 | `takeover <target>` | enum + probe + subdomain-takeover checks |
@@ -66,7 +67,7 @@ list of domains, or a list of hosts), and tweak with a few options.
 | `update` | Check for a newer RecoGun version, then exit |
 
 Phase names for `run`: `enum`, `bruteforce`, `probe`, `origin`, `ports`,
-`takeover`, `crawl`, `jsanalysis`.
+`takeover`, `crawl`, `jsanalysis`, `params`.
 
 ## Targets (auto-detected)
 
@@ -116,13 +117,19 @@ starts, so you can see exactly what's about to happen.
 4. **probe** — httpx confirms live hosts, diffed against the previous run.
 5. **ports** — `naabu -passive`, no direct scanning of the target.
 6. **takeover** — subzy against live subdomains.
-7. **crawl** — waymore, waybackurls, gau, katana (parallel); merged, diffed,
-   deduped with `uro`, split into JS files and API-shaped endpoints. If
-   `paramx` is installed, parameterized URLs are tagged by likely vuln class
-   for triage — classification only, no payloads sent. JS URLs are also
-   **downloaded** into `js_files/` and passed to jsanalysis.
+7. **crawl** — waymore, waybackurls, gau, urlfinder, katana, hakrawler
+   (parallel); merged, diffed, deduped with `uro`, split into JS files and
+   API-shaped endpoints. If `paramx` is installed, parameterized URLs are
+   tagged by likely vuln class for triage — classification only, no payloads
+   sent. JS URLs are also **downloaded** into `js_files/` and passed to
+   jsanalysis. During the run you get live `[done/total]` progress with each
+   tool's elapsed time and result count.
 8. **jsanalysis** — full JavaScript intelligence over the downloaded JS
    (offline, no requests to the target). See the section below.
+9. **params** — Arjun probes the crawled URLs for hidden query/body parameters
+   and writes `parameters.json`. **Active** — it sends real requests to the
+   target, so it only runs when you opt in (the `params` command, `full`, or
+   `run ...,params`). Never fires on a plain `crawl`.
 
 Every run also writes `report.txt` (human) and `report.json` (machine-readable),
 and diffs subdomains / active hosts / URLs against the previous run for the

@@ -35,6 +35,7 @@ BRUTEFORCE=false
 PORT_DISCOVERY=false
 ORIGIN_IP_DISCOVERY=false
 CRAWLING=false
+PARAM_DISCOVERY=false
 VERBOSE=false
 PERMUTATION_WORDLIST_CUSTOM=false
 ONLY_PHASES=()          # if non-empty, run ONLY these phases
@@ -1057,7 +1058,12 @@ process_domain() {
         command -v waymore &>/dev/null && CRAWL_TOOLS_ALL+=("waymore:waymore -i $domain -mode U -oU /dev/stdout")
         command -v waybackurls &>/dev/null && CRAWL_TOOLS_ALL+=("waybackurls:cat $ACTIVE_SUBDOMAINS | xargs -P $PARALLEL_JOBS -I{} sh -c 'echo {} | waybackurls' 2>/dev/null")
         command -v gau &>/dev/null && CRAWL_TOOLS_ALL+=("gau-crawl:cat $ACTIVE_SUBDOMAINS | gau --threads $PARALLEL_JOBS")
+        # urlfinder: passive URL discovery (PD), takes the host list as a file.
+        command -v urlfinder &>/dev/null && CRAWL_TOOLS_ALL+=("urlfinder:urlfinder -list $ACTIVE_SUBDOMAINS -silent")
         command -v katana &>/dev/null && CRAWL_TOOLS_ALL+=("katana:katana -d 3 -jc -aff -fx -list $ACTIVE_SUBDOMAINS -c $PARALLEL_JOBS -silent")
+        # hakrawler: active crawler, reads URLs from stdin; -subs keeps in-scope
+        # subdomains, -u dedupes, -insecure tolerates bad TLS on recon targets.
+        command -v hakrawler &>/dev/null && CRAWL_TOOLS_ALL+=("hakrawler:cat $ACTIVE_SUBDOMAINS | hakrawler -d 3 -t $PARALLEL_JOBS -subs -u -insecure")
 
         local CRAWL_TOOLS=()
         filter_tools_by_flags CRAWL_TOOLS_ALL CRAWL_TOOLS
@@ -1105,6 +1111,41 @@ process_domain() {
             fi
         else
             log_message "[!] No crawling results found" "$YELLOW"
+        fi
+    fi
+
+    # ---- Phase 6a: parameter discovery with Arjun (opt-in via `params`) ----
+    # ACTIVE: Arjun sends real requests to probe endpoints for hidden query/body
+    # parameters, so it is gated behind its own opt-in phase (not run on every
+    # crawl). Input priority: this run's filtered/crawled URLs, then a -f list.
+    if optin_phase_runs params "$PARAM_DISCOVERY"; then
+        local arjun_input=""
+        if [ -s "$domain_output_dir/crawling/filtered_urls.txt" ]; then
+            arjun_input="$domain_output_dir/crawling/filtered_urls.txt"
+        elif [ -s "$domain_output_dir/crawling/final_crawling_results.txt" ]; then
+            arjun_input="$domain_output_dir/crawling/final_crawling_results.txt"
+        elif [ -n "$INPUT_HOSTS_FILE" ] && [ -s "$INPUT_HOSTS_FILE" ]; then
+            arjun_input="$INPUT_HOSTS_FILE"
+        fi
+
+        if ! command -v arjun &>/dev/null; then
+            log_message "[!] arjun not installed - skipping parameter discovery" "$YELLOW"
+        elif [ -z "$arjun_input" ]; then
+            log_message "[!] params: no URLs to probe (run with crawl, or supply -f <urls.txt>)" "$YELLOW"
+        else
+            local arjun_out="$domain_output_dir/parameters.json"
+            log_message "[*] Arjun: probing $(count_unique_results "$arjun_input") URL(s) for hidden parameters (active)..." "$BLUE"
+            $VERBOSE && log_message "    -> arjun -i $arjun_input -oJ $arjun_out -t $PARALLEL_JOBS --stable" "$CYAN"
+            if timeout "$CRAWL_TIMEOUT_SECONDS" arjun -i "$arjun_input" -oJ "$arjun_out" -t "$PARALLEL_JOBS" --stable 2>> "$CURRENT_LOG"; then
+                if [ -s "$arjun_out" ]; then
+                    log_message "[OK] Arjun wrote discovered parameters to parameters.json" "$GREEN"
+                else
+                    log_message "[!] Arjun found no parameters" "$YELLOW"
+                    rm -f "$arjun_out"
+                fi
+            else
+                log_message "[X] Arjun failed or timed out" "$RED"
+            fi
         fi
     fi
 
@@ -1195,6 +1236,12 @@ process_domain() {
             for f in "$domain_output_dir/crawling/paramx"/*.txt; do
                 echo "$(basename "$f" .txt): $(count_unique_results "$f") URLs"
             done
+            echo ""
+        fi
+
+        if [ -s "$domain_output_dir/parameters.json" ]; then
+            echo "=== Hidden Parameters (Arjun) ==="
+            echo "See parameters.json"
             echo ""
         fi
 
@@ -1324,9 +1371,14 @@ check_dependencies() {
 
     _dep_check "Crawling" waymore ""
     _dep_check "Crawling" waybackurls ""
+    _dep_check "Crawling" gau ""
+    _dep_check "Crawling" urlfinder ""
     _dep_check "Crawling" katana ""
+    _dep_check "Crawling" hakrawler ""
     _dep_check "Crawling" uro ""
     _dep_check "Crawling" paramx ""
+
+    _dep_check "Parameter discovery (params)" arjun ""
 
     # JS analysis works with zero external tools (built-in regex engine), but
     # these add maintained rule sets / extractors when present.
@@ -1413,11 +1465,12 @@ show_usage() {
     echo ""
     echo -e "${GREEN}Commands:${RESET}"
     echo "  scan <target>       Default recon: enum -> probe -> takeover"
-    echo "  full <target>       Everything: enum, bruteforce, probe, origin, ports, takeover, crawl"
+    echo "  full <target>       Everything: enum, bruteforce, probe, origin, ports, takeover, crawl, params"
     echo "  enum <target>       Only find subdomains"
     echo "  probe <target>      Only enum + httpx probe (which subdomains are live)"
-    echo "  crawl <target>      Crawl (waymore/waybackurls/gau/katana) + JS analysis"
+    echo "  crawl <target>      Crawl (waymore/wayback/gau/urlfinder/katana/hakrawler) + JS analysis"
     echo "  js <jsurls.txt>     Only JS intelligence analysis on a list of .js URLs"
+    echo "  params <target>     Crawl, then probe URLs for hidden parameters (Arjun, ACTIVE)"
     echo "  origin <target>     Only origin-IP-behind-WAF discovery"
     echo "  ports <target>      Only passive port discovery (naabu -passive)"
     echo "  takeover <target>   Only subdomain-takeover checks"
@@ -1457,7 +1510,7 @@ show_usage() {
 set_phases_for_command() {
     case "$1" in
         scan)     ONLY_PHASES=(enum probe takeover) ;;
-        full)     ONLY_PHASES=(enum bruteforce probe origin ports takeover crawl jsanalysis) ;;
+        full)     ONLY_PHASES=(enum bruteforce probe origin ports takeover crawl jsanalysis params) ;;
         enum)     ONLY_PHASES=(enum) ;;
         probe)    ONLY_PHASES=(enum probe) ;;
         crawl)    ONLY_PHASES=(crawl jsanalysis) ;;
@@ -1465,6 +1518,7 @@ set_phases_for_command() {
         ports)    ONLY_PHASES=(enum probe ports) ;;
         takeover) ONLY_PHASES=(enum probe takeover) ;;
         js)       ONLY_PHASES=(jsanalysis) ;;
+        params)   ONLY_PHASES=(crawl params) ;;
         *)        return 1 ;;
     esac
 }
@@ -1509,7 +1563,7 @@ case "$COMMAND" in
         check_dependencies; exit 0 ;;
     update)
         check_for_updates true; exit 0 ;;
-    scan|full|enum|probe|crawl|origin|ports|takeover|js)
+    scan|full|enum|probe|crawl|origin|ports|takeover|js|params)
         set_phases_for_command "$COMMAND"
         TARGET="${1:-}"; [ $# -gt 0 ] && shift ;;
     run)
@@ -1530,6 +1584,7 @@ for ph in "${ONLY_PHASES[@]}"; do
         ports)      PORT_DISCOVERY=true ;;
         origin)     ORIGIN_IP_DISCOVERY=true ;;
         crawl)      CRAWLING=true ;;
+        params)     PARAM_DISCOVERY=true ;;
     esac
 done
 
@@ -1557,7 +1612,7 @@ if [ -z "$TARGET" ]; then
     show_usage; exit 1
 fi
 
-VALID_PHASES=" enum bruteforce probe origin ports takeover crawl jsanalysis "
+VALID_PHASES=" enum bruteforce probe origin ports takeover crawl jsanalysis params "
 for ph in "${ONLY_PHASES[@]}"; do
     if [[ "$VALID_PHASES" != *" $ph "* ]]; then
         echo -e "${RED}Error: unknown phase '$ph'. Valid: enum, bruteforce, probe, origin, ports, takeover, crawl, jsanalysis${RESET}"
@@ -1590,7 +1645,7 @@ check_for_updates
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v6.3                |"
+echo "  |              RecoGun v6.4                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  |                 by $OPERATOR                 |"
 echo "  +=========================================+"
