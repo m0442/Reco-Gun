@@ -207,13 +207,22 @@ RecoGun resolves them flexibly — it finds them if any of these is true:
 - you point an env var at it: `SECRETFINDER_PATH=/path/SecretFinder.py`,
   `LINKFINDER_PATH=/path/LinkFinder.py` (in `config.env` or the environment).
 
-Typical install:
+Typical install. On Kali / Debian 12+ (Python 3.12) a system-wide
+`pip install` fails with `externally-managed-environment` (PEP 668), so use a
+venv for the deps and point RecoGun at `<venv-python> <script.py>`:
 
 ```bash
 mkdir -p ~/tools && cd ~/tools
-git clone https://github.com/m4ll0k/SecretFinder && pip install -r SecretFinder/requirements.txt
-git clone https://github.com/GerbenJavado/LinkFinder && pip install -r LinkFinder/requirements.txt
-recogun check     # both now show [OK] with the resolved path
+git clone https://github.com/m4ll0k/SecretFinder
+git clone https://github.com/GerbenJavado/LinkFinder
+python3 -m venv jsvenv
+./jsvenv/bin/pip install requests jsbeautifier
+
+# then in config.env (see config.env.example):
+#   SECRETFINDER_PATH="$HOME/tools/jsvenv/bin/python $HOME/tools/SecretFinder/SecretFinder.py"
+#   LINKFINDER_PATH="$HOME/tools/jsvenv/bin/python $HOME/tools/LinkFinder/LinkFinder.py"
+
+recogun check     # both now show [OK] with the resolved venv path
 ```
 
 `recogun check` prints the resolved invocation next to each so you can see
