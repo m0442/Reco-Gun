@@ -140,7 +140,7 @@ optin_phase_runs() {
 redact_command() {
     local cmd="$1"
     for key_var in CHAOS_API_KEY SHODAN_API_KEY CENSYS_API_KEY VIRUSTOTAL_API_KEY \
-                   GITHUB_TOKEN GITLAB_TOKEN; do
+                   GITHUB_TOKEN GITLAB_TOKEN OTX_API_KEY; do
         local val="${!key_var}"
         [[ -n "$val" ]] && cmd="${cmd//$val/***REDACTED***}"
     done
@@ -535,13 +535,21 @@ analyze_js() {
         if [ ${#hi_lines[@]} -gt 0 ]; then
             echo "## 🔴 High signal — review first"
             echo ""
-            echo "| Category | Unique hits | File |"
-            echo "|---|---:|---|"
-            local l
+            local l hcat
             for l in "${hi_lines[@]}"; do
-                printf "| %s | %s | \`findings/%s.txt\` |\n" "${l%%|*}" "${l#*|}" "${l%%|*}"
+                hcat="${l%%|*}"
+                echo "### $hcat  (${l#*|} unique)"
+                echo ""
+                echo '```'
+                # Inline the actual values (capped) so you see the finding, not
+                # just a count - the whole point of "readable". Full list + the
+                # source files are in findings/<category>.txt.
+                grep -v '^#' "$find_dir/$hcat.txt" 2>/dev/null | head -25
+                local total_v; total_v=$(grep -vc '^#' "$find_dir/$hcat.txt")
+                [ "$total_v" -gt 25 ] && echo "... (+$((total_v - 25)) more — see findings/$hcat.txt)"
+                echo '```'
+                echo ""
             done
-            echo ""
         fi
         if [ ${#lo_lines[@]} -gt 0 ]; then
             echo "## Everything else"
@@ -1290,7 +1298,7 @@ process_domain() {
         if ! command -v arjun &>/dev/null; then
             log_message "[!] arjun not installed - skipping parameter discovery" "$YELLOW"
         elif [ -z "$arjun_input" ]; then
-            log_message "[!] params: no URLs to probe (run with crawl, or supply -f <urls.txt>)" "$YELLOW"
+            log_message "[!] params: no URLs to probe. Use the 'params' command (crawls first), or pass a URL-list file as the target: recogun params urls.txt" "$YELLOW"
         else
             local arjun_out="$domain_output_dir/parameters.json"
             log_message "[*] Arjun: probing $(count_unique_results "$arjun_input") URL(s) for hidden parameters (active)..." "$BLUE"
@@ -1313,7 +1321,8 @@ process_domain() {
     # this run's js_files/ (from crawl), or -f as a JS-URL list to download now.
     if phase_enabled jsanalysis; then
         local js_src_dir="$domain_output_dir/js_files"
-        # Standalone mode: --only jsanalysis -f jsurls.txt (no crawl this run).
+        # Standalone mode: `recogun js jsurls.txt` (no crawl this run) - the
+        # JS-URL list arrives as INPUT_HOSTS_FILE via the target-file split.
         if [ ! -d "$js_src_dir" ] || [ -z "$(find "$js_src_dir" -maxdepth 1 -name '*.js' 2>/dev/null)" ]; then
             if [ -n "$INPUT_HOSTS_FILE" ]; then
                 log_message "[*] jsanalysis: downloading JS from $INPUT_HOSTS_FILE..." "$BLUE"
@@ -1348,7 +1357,7 @@ process_domain() {
                     log_message "[i] New JS findings since last scan in js_analysis/new/" "$CYAN"
             fi
         else
-            log_message "[!] jsanalysis: no JS files available (run with crawl, or supply -f <jsurls.txt>)" "$YELLOW"
+            log_message "[!] jsanalysis: no JS files available. Run with crawl, or pass a JS-URL-list file as the target: recogun js jsurls.txt" "$YELLOW"
         fi
     fi
 
@@ -1409,6 +1418,26 @@ process_domain() {
         if [ -s "$domain_output_dir/parameters.json" ]; then
             echo "=== Hidden Parameters (Arjun) ==="
             echo "See parameters.json"
+            echo ""
+        fi
+
+        # Surface JS analysis in the main report - it's the richest output and
+        # was previously invisible here. Show the high-signal categories (with
+        # counts) and point at the readable reports.
+        if [ -d "$domain_output_dir/js_analysis/findings" ]; then
+            echo "=== JavaScript Intelligence ==="
+            echo "Full report: js_analysis/_FINDINGS.md   (summary: js_analysis/_SUMMARY.txt)"
+            local hs_shown=false hsf hscat hscount
+            for hsf in "$domain_output_dir"/js_analysis/findings/{secrets_,cloud_,auth_,infra_internal}*.txt; do
+                [ -f "$hsf" ] || continue
+                hscat=$(basename "$hsf" .txt)
+                hscount=$(grep -vc '^#' "$hsf")
+                $hs_shown || { echo "High-signal categories:"; hs_shown=true; }
+                printf "  %-32s %s hit(s)\n" "$hscat" "$hscount"
+            done
+            $hs_shown || echo "No high-signal (secrets/cloud/auth/internal) categories matched."
+            [ -d "$domain_output_dir/js_analysis/new" ] && [ -n "$(ls -A "$domain_output_dir/js_analysis/new" 2>/dev/null)" ] && \
+                echo "NEW findings since last scan: js_analysis/new/"
             echo ""
         fi
 
@@ -1832,7 +1861,7 @@ check_for_updates
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v6.6                |"
+echo "  |              RecoGun v6.7                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  |                 by $OPERATOR                 |"
 echo "  +=========================================+"

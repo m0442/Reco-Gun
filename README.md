@@ -170,8 +170,11 @@ recogun js js_urls.txt             # analyze a list of .js URLs directly
 
 Output lands in `results/<domain>_<ts>/js_analysis/`:
 
-- **`_FINDINGS.md`** — prioritized report; high-signal categories (secrets,
-  cloud, auth, internal hosts) surfaced first. **Start here.**
+- **`_FINDINGS.md`** — prioritized report. High-signal categories (secrets,
+  cloud, auth, internal hosts) are surfaced first **with their actual values
+  inlined** (capped at 25/category, each tagged with its source `.js`), so you
+  read the finding itself, not just a count. **Start here.** The main
+  `report.txt` also links here and lists the high-signal counts.
 - **`_SUMMARY.txt`** — category → unique-hit-count table.
 - **`findings/<category>.txt`** — per-category detail. Each line is the matched
   value followed by the source JS file(s) it came from (`VALUE <TAB> <-  a.js, b.js`),
