@@ -1190,9 +1190,12 @@ process_domain() {
         # urlfinder: passive URL discovery (PD), takes the host list as a file.
         command -v urlfinder &>/dev/null && CRAWL_TOOLS_ALL+=("urlfinder:urlfinder -list $ACTIVE_SUBDOMAINS -silent")
         command -v katana &>/dev/null && CRAWL_TOOLS_ALL+=("katana:katana -d 3 -jc -aff -fx -list $ACTIVE_SUBDOMAINS -c $PARALLEL_JOBS -silent")
-        # hakrawler: active crawler, reads URLs from stdin; -subs keeps in-scope
-        # subdomains, -u dedupes, -insecure tolerates bad TLS on recon targets.
-        command -v hakrawler &>/dev/null && CRAWL_TOOLS_ALL+=("hakrawler:cat $ACTIVE_SUBDOMAINS | hakrawler -d 3 -t $PARALLEL_JOBS -subs -u -insecure")
+        # hakrawler: active crawler, reads URLs from stdin. It needs a scheme -
+        # bare hostnames (from the bare-domain seed or a plain host list) give
+        # it nothing to crawl and it exits instantly. Prepend https:// to any
+        # line that doesn't already have a scheme. -subs keeps in-scope subs,
+        # -u dedupes, -insecure tolerates bad TLS on recon targets.
+        command -v hakrawler &>/dev/null && CRAWL_TOOLS_ALL+=("hakrawler:sed -E 's#^(https?://)?#https://#' $ACTIVE_SUBDOMAINS | hakrawler -d 3 -t $PARALLEL_JOBS -subs -u -insecure")
 
         local CRAWL_TOOLS=()
         filter_tools_by_flags CRAWL_TOOLS_ALL CRAWL_TOOLS
@@ -1861,7 +1864,7 @@ check_for_updates
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v6.7                |"
+echo "  |              RecoGun v6.8                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  |                 by $OPERATOR                 |"
 echo "  +=========================================+"
