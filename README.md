@@ -196,6 +196,29 @@ Categories extracted (built-in regex engine, ~60 categories):
 (verified secrets), `SecretFinder`, `LinkFinder`, `endext`. The built-in
 engine needs none of them — it works with just `curl`, `grep`, `sort`.
 
+`SecretFinder` and `LinkFinder` ship as Python scripts (`SecretFinder.py` /
+`LinkFinder.py`) and are usually **not** on `$PATH` as a bare command, so a
+plain `command -v secretfinder` reports them missing even when they're cloned.
+RecoGun resolves them flexibly — it finds them if any of these is true:
+
+- a `secretfinder` / `linkfinder` command is on `$PATH`, **or**
+- `SecretFinder.py` / `LinkFinder.py` is on `$PATH`, **or**
+- the `.py` lives under `~/tools`, `~/`, `/opt`, or `/usr/*/share` (depth ≤ 3), **or**
+- you point an env var at it: `SECRETFINDER_PATH=/path/SecretFinder.py`,
+  `LINKFINDER_PATH=/path/LinkFinder.py` (in `config.env` or the environment).
+
+Typical install:
+
+```bash
+mkdir -p ~/tools && cd ~/tools
+git clone https://github.com/m4ll0k/SecretFinder && pip install -r SecretFinder/requirements.txt
+git clone https://github.com/GerbenJavado/LinkFinder && pip install -r LinkFinder/requirements.txt
+recogun check     # both now show [OK] with the resolved path
+```
+
+`recogun check` prints the resolved invocation next to each so you can see
+exactly what it found (and, when missing, which env var to set).
+
 ### Setting up the `origin` phase
 
 Most origin sources work off `config.env` keys, but three tools read their

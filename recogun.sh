@@ -289,6 +289,39 @@ download_js_files() {
     log_message "[OK] Downloaded $n JS files" "$GREEN"
 }
 
+# Resolve a Python-script tool (SecretFinder / LinkFinder) that is often NOT
+# on $PATH as a clean lowercase command. Prints an invocation prefix on stdout
+# (e.g. "python3 /opt/SecretFinder/SecretFinder.py") and returns 0 if found,
+# else returns 1. Lookup order:
+#   1) an explicit override env var (SECRETFINDER_PATH / LINKFINDER_PATH)
+#   2) a bare command on $PATH (secretfinder / linkfinder)
+#   3) the canonical .py name on $PATH (SecretFinder.py / LinkFinder.py)
+#   4) the .py under common install dirs (~/tools, /opt, ~/, git-clone layout)
+# Usage: resolve_py_tool secretfinder SecretFinder.py SECRETFINDER_PATH
+resolve_py_tool() {
+    local bare="$1" script="$2" envvar="$3"
+    local override="${!envvar:-}"
+
+    # 1) explicit override (file path to the .py, or a full command)
+    if [ -n "$override" ]; then
+        if [ -f "$override" ]; then echo "python3 $override"; return 0; fi
+        # allow the user to point the env var at a ready-to-run command too
+        if command -v "${override%% *}" &>/dev/null; then echo "$override"; return 0; fi
+    fi
+    # 2) bare command on PATH
+    if command -v "$bare" &>/dev/null; then echo "$bare"; return 0; fi
+    # 3) canonical script name on PATH
+    if command -v "$script" &>/dev/null; then echo "python3 $(command -v "$script")"; return 0; fi
+    # 4) common install locations
+    local d hit
+    for d in "$HOME/tools" "$HOME" /opt /usr/local/share /usr/share; do
+        [ -d "$d" ] || continue
+        hit=$(find "$d" -maxdepth 3 -name "$script" -type f 2>/dev/null | head -n1)
+        [ -n "$hit" ] && { echo "python3 $hit"; return 0; }
+    done
+    return 1
+}
+
 # Full JavaScript intelligence extraction over a folder of downloaded .js
 # files. Everything here is offline pattern-matching against already-fetched
 # content - no requests to the target. Each category writes its own file so
@@ -533,18 +566,20 @@ analyze_js() {
         trufflehog filesystem "$js_dir" --no-update --json > "$out_dir/_trufflehog.json" 2>>"$CURRENT_LOG" || true
         [ -s "$out_dir/_trufflehog.json" ] && printf "%-32s %s\n" "trufflehog_findings" "$(wc -l < "$out_dir/_trufflehog.json")" >> "$summary"
     fi
-    # SecretFinder / LinkFinder / endext operate per-file on JS.
-    local jf
-    if command -v secretfinder &>/dev/null || command -v SecretFinder.py &>/dev/null; then
-        local sf; sf=$(command -v secretfinder || command -v SecretFinder.py)
-        log_message "[+] Running SecretFinder..." "$BLUE"
-        for jf in $files; do "$sf" -i "$jf" -o cli >> "$out_dir/_secretfinder.txt" 2>>"$CURRENT_LOG" || true; done
+    # SecretFinder / LinkFinder / endext operate per-file on JS. SecretFinder
+    # and LinkFinder are Python scripts rarely on $PATH as a bare command, so we
+    # resolve them flexibly (bare cmd / .py on PATH / common tools dirs / env
+    # override). The resolved value can be a multi-word prefix (python3 x.py),
+    # so invoke via `eval`.
+    local jf sf lf
+    if sf=$(resolve_py_tool secretfinder SecretFinder.py SECRETFINDER_PATH); then
+        log_message "[+] Running SecretFinder ($sf)..." "$BLUE"
+        for jf in $files; do eval "$sf -i \"\$jf\" -o cli" >> "$out_dir/_secretfinder.txt" 2>>"$CURRENT_LOG" || true; done
         [ -s "$out_dir/_secretfinder.txt" ] && printf "%-32s %s\n" "secretfinder_lines" "$(wc -l < "$out_dir/_secretfinder.txt")" >> "$summary"
     fi
-    if command -v linkfinder &>/dev/null || command -v LinkFinder.py &>/dev/null; then
-        local lf; lf=$(command -v linkfinder || command -v LinkFinder.py)
-        log_message "[+] Running LinkFinder (endpoint extraction)..." "$BLUE"
-        for jf in $files; do "$lf" -i "$jf" -o cli >> "$out_dir/_linkfinder.txt" 2>>"$CURRENT_LOG" || true; done
+    if lf=$(resolve_py_tool linkfinder LinkFinder.py LINKFINDER_PATH); then
+        log_message "[+] Running LinkFinder ($lf)..." "$BLUE"
+        for jf in $files; do eval "$lf -i \"\$jf\" -o cli" >> "$out_dir/_linkfinder.txt" 2>>"$CURRENT_LOG" || true; done
         [ -s "$out_dir/_linkfinder.txt" ] && { sort -u "$out_dir/_linkfinder.txt" -o "$out_dir/_linkfinder.txt"; printf "%-32s %s\n" "linkfinder_endpoints" "$(wc -l < "$out_dir/_linkfinder.txt")" >> "$summary"; }
     fi
     if command -v endext &>/dev/null; then
@@ -1468,6 +1503,26 @@ check_dependencies() {
         fi
     }
 
+    # Like _dep_check but for Python-script tools resolved via resolve_py_tool,
+    # so `check` agrees with what analyze_js actually finds/runs. Shows the
+    # resolved invocation path when found, and the env-var hint when not.
+    _dep_check_py() {
+        local category="$1" label="$2" bare="$3" script="$4" envvar="$5"
+        if [[ "$category" != "$current_category" ]]; then
+            echo ""
+            echo -e "${CYAN}${category}${RESET}"
+            current_category="$category"
+        fi
+        total=$((total + 1))
+        local resolved
+        if resolved=$(resolve_py_tool "$bare" "$script" "$envvar"); then
+            found=$((found + 1))
+            echo -e "  ${GREEN}[OK]${RESET}      ${label}  ${CYAN}(${resolved})${RESET}"
+        else
+            echo -e "  ${RED}[MISSING]${RESET} ${label}  (not on PATH / ~/tools / /opt; set ${envvar}=/path/to/${script})"
+        fi
+    }
+
     _dep_check "Core (required for any scan)" curl ""
     _dep_check "Core (required for any scan)" jq ""
     _dep_check "Core (required for any scan)" httpx ""
@@ -1515,8 +1570,8 @@ check_dependencies() {
     # JS analysis works with zero external tools (built-in regex engine), but
     # these add maintained rule sets / extractors when present.
     _dep_check "JS analysis (optional boosters)" trufflehog ""
-    _dep_check "JS analysis (optional boosters)" secretfinder ""
-    _dep_check "JS analysis (optional boosters)" linkfinder ""
+    _dep_check_py "JS analysis (optional boosters)" secretfinder secretfinder SecretFinder.py SECRETFINDER_PATH
+    _dep_check_py "JS analysis (optional boosters)" linkfinder linkfinder LinkFinder.py LINKFINDER_PATH
     _dep_check "JS analysis (optional boosters)" endext ""
 
     echo ""
@@ -1529,7 +1584,7 @@ check_dependencies() {
         echo -e "  ${RED}[MISSING]${RESET} python3 + mmh3 module (pip install mmh3)"
     fi
 
-    unset -f _dep_check
+    unset -f _dep_check _dep_check_py
 
     echo ""
     echo -e "${PURPLE}----------------------------------------------${RESET}"
@@ -1777,7 +1832,7 @@ check_for_updates
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v6.5                |"
+echo "  |              RecoGun v6.6                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  |                 by $OPERATOR                 |"
 echo "  +=========================================+"
