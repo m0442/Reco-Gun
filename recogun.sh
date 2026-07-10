@@ -197,6 +197,230 @@ merge_results() {
     cat "$dir"/*.txt 2>/dev/null | sed '/^\s*$/d' | sort -u > "$dest"
 }
 
+# Download every JS URL in a list into a folder, in parallel (capped). Each
+# file is named by a hash of its URL (so two different URLs never collide and
+# re-runs are stable), with a .url sidecar recording the source URL. Skips
+# non-JS/empty responses. Feeds the jsanalysis phase.
+download_js_files() {
+    local url_list="$1"
+    local dest_dir="$2"
+    [ -s "$url_list" ] || { log_message "[i] No JS URLs to download" "$YELLOW"; return; }
+    mkdir -p "$dest_dir"
+
+    log_message "[+] Downloading $(count_unique_results "$url_list") JS files into $(basename "$dest_dir")/ ..." "$BLUE"
+    local hasher="md5sum"
+    command -v md5sum &>/dev/null || hasher="shasum"
+
+    # Process-substitution (not a pipe) so this loop runs in the CURRENT shell -
+    # a piped `... | while` runs in a subshell, so the parent `wait` below would
+    # wait for nothing and the count would race ahead of the downloads.
+    while IFS= read -r url || [[ -n "$url" ]]; do
+        [[ -z "$url" ]] && continue
+        (
+            local h base out
+            h=$(printf '%s' "$url" | $hasher | awk '{print $1}')
+            base=$(printf '%s' "$url" | sed 's#.*/##; s/[?#].*//; s/[^A-Za-z0-9._-]/_/g')
+            [ -z "$base" ] && base="script"
+            out="$dest_dir/${base}.${h:0:10}.js"
+            if curl -sk --max-time 20 -A "Mozilla/5.0" "$url" -o "$out" 2>/dev/null; then
+                # Drop empties and obvious HTML error pages - keep real JS only.
+                if [ ! -s "$out" ] || head -c 200 "$out" | grep -qiE '<!doctype html|<html'; then
+                    rm -f "$out"
+                else
+                    printf '%s\n' "$url" > "$out.url"
+                fi
+            fi
+        ) &
+        while [ "$(jobs -r -p | wc -l)" -ge "$PARALLEL_JOBS" ]; do wait -n; done
+    done < <(sort -u "$url_list")
+    wait
+
+    local n
+    n=$(find "$dest_dir" -maxdepth 1 -name '*.js' 2>/dev/null | wc -l)
+    log_message "[OK] Downloaded $n JS files" "$GREEN"
+}
+
+# Full JavaScript intelligence extraction over a folder of downloaded .js
+# files. Everything here is offline pattern-matching against already-fetched
+# content - no requests to the target. Each category writes its own file so
+# you can grep/triage per class; a findings summary tallies hit counts.
+#
+# Categories map to the attack-surface list a bug-bounty JS review looks for:
+# secrets, cloud resources, endpoints/APIs, auth, DOM sinks/sources, storage,
+# third-party services, library fingerprints, source maps, and more.
+analyze_js() {
+    local js_dir="$1"
+    local out_dir="$2"
+
+    local files
+    files=$(find "$js_dir" -maxdepth 1 -name '*.js' 2>/dev/null)
+    if [ -z "$files" ]; then
+        log_message "[!] No downloaded JS files to analyze in $js_dir" "$YELLOW"
+        return 1
+    fi
+    mkdir -p "$out_dir"
+    local count
+    count=$(printf '%s\n' "$files" | grep -c . )
+    log_message "[*] Analyzing $count JS files for attack surface..." "$BLUE"
+
+    # category|extended-regex . grep -hoiE across all files, sort -u per file.
+    # Ordering roughly by triage priority (secrets/cloud first).
+    local -a PATTERNS=(
+      # --- Secrets / credentials / keys ---
+      "secrets_aws_akid|AKIA[0-9A-Z]{16}"
+      "secrets_aws_secret|aws_secret_access_key['\"]?[[:space:]]*[:=][[:space:]]*['\"][A-Za-z0-9/+=]{40}['\"]"
+      "secrets_google_api|AIza[0-9A-Za-z_-]{35}"
+      "secrets_gcp_oauth|[0-9]+-[0-9a-z_]{32}\.apps\.googleusercontent\.com"
+      "secrets_firebase|AAAA[A-Za-z0-9_-]{7}:[A-Za-z0-9_-]{140}"
+      "secrets_slack|xox[baprs]-[0-9A-Za-z-]{10,72}"
+      "secrets_slack_webhook|https://hooks\.slack\.com/services/[A-Za-z0-9/]+"
+      "secrets_github_pat|gh[pousr]_[A-Za-z0-9]{36,}"
+      "secrets_gitlab_pat|glpat-[A-Za-z0-9_-]{20}"
+      "secrets_stripe|(sk|pk|rk)_(live|test)_[0-9A-Za-z]{24,}"
+      "secrets_square|sq0(atp|csp)-[0-9A-Za-z_-]{22,}"
+      "secrets_paypal_braintree|access_token\\\$production\\\$[0-9a-z]{16}\\\$[0-9a-f]{32}"
+      "secrets_twilio|SK[0-9a-fA-F]{32}"
+      "secrets_sendgrid|SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}"
+      "secrets_mailgun|key-[0-9a-zA-Z]{32}"
+      "secrets_mailchimp|[0-9a-f]{32}-us[0-9]{1,2}"
+      "secrets_npm|npm_[A-Za-z0-9]{36}"
+      "secrets_openai|sk-[A-Za-z0-9]{20,}T3BlbkFJ[A-Za-z0-9]{20,}"
+      "secrets_anthropic|sk-ant-[A-Za-z0-9_-]{20,}"
+      "secrets_jwt|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
+      "secrets_private_key|-----BEGIN (RSA|EC|DSA|OPENSSH|PGP)? ?PRIVATE KEY-----"
+      "secrets_bearer|[Bb]earer[[:space:]]+[A-Za-z0-9._-]{20,}"
+      "secrets_generic_apikey|(api[_-]?key|apikey|client[_-]?secret|secret[_-]?key|access[_-]?token)['\"]?[[:space:]]*[:=][[:space:]]*['\"][A-Za-z0-9._-]{16,}['\"]"
+      "secrets_password_assign|(password|passwd|pwd)['\"]?[[:space:]]*[:=][[:space:]]*['\"][^'\"[:space:]]{4,}['\"]"
+
+      # --- Cloud resources ---
+      "cloud_s3|[A-Za-z0-9._-]+\.s3(\.[a-z0-9-]+)?\.amazonaws\.com|s3://[A-Za-z0-9._-]+"
+      "cloud_cloudfront|[A-Za-z0-9]+\.cloudfront\.net"
+      "cloud_azure_blob|[A-Za-z0-9]+\.blob\.core\.windows\.net"
+      "cloud_azure_other|[A-Za-z0-9-]+\.(azurewebsites|azure-api|azureedge|table\.core\.windows|queue\.core\.windows)\.net"
+      "cloud_gcs|storage\.googleapis\.com/[A-Za-z0-9._-]+|[A-Za-z0-9._-]+\.storage\.googleapis\.com"
+      "cloud_gcp_functions|[a-z0-9-]+\.cloudfunctions\.net"
+      "cloud_firebase_db|[A-Za-z0-9-]+\.firebaseio\.com|[A-Za-z0-9-]+\.firebaseapp\.com"
+      "cloud_digitalocean_spaces|[A-Za-z0-9.-]+\.digitaloceanspaces\.com"
+
+      # --- Endpoints / APIs / routes ---
+      "endpoints_paths|['\"](/[A-Za-z0-9._/-]{2,})['\"]"
+      "endpoints_api|['\"](/(api|rest|v[0-9]+|internal|admin|private|gateway)/[A-Za-z0-9._/-]*)['\"]"
+      "endpoints_graphql|(/graphql[a-z0-9/_-]*|graphql['\"]?[[:space:]]*[:=]|__schema|gql\`)"
+      "endpoints_websocket|wss?://[A-Za-z0-9._:/?=&-]+"
+      "endpoints_absolute_urls|https?://[A-Za-z0-9._-]+(:[0-9]+)?(/[A-Za-z0-9._/?#=&%-]*)?"
+      "endpoints_upload|['\"](/[A-Za-z0-9._/-]*(upload|import|attachment|file)[A-Za-z0-9._/-]*)['\"]"
+      "endpoints_download|['\"](/[A-Za-z0-9._/-]*(download|export|report|invoice)[A-Za-z0-9._/-]*)['\"]"
+      "endpoints_admin_debug|['\"](/[A-Za-z0-9._/-]*(admin|debug|internal|test|staging|dev|actuator|swagger|graphiql|metrics|healthz?)[A-Za-z0-9._/-]*)['\"]"
+
+      # --- Internal / infra references ---
+      "infra_internal_hosts|(localhost|127\.0\.0\.1|0\.0\.0\.0|[A-Za-z0-9-]+\.(internal|local|corp|intranet|test|staging|dev|qa)\.[A-Za-z0-9.-]+)"
+      "infra_ip_addresses|([0-9]{1,3}\.){3}[0-9]{1,3}"
+      "infra_staging_refs|(staging|preprod|pre-prod|uat|sandbox|dev-|test-|qa-)[A-Za-z0-9.-]*"
+
+      # --- Auth / identity ---
+      "auth_oauth|(oauth2?|/authorize|/oauth/token|response_type=|grant_type=|client_id=|redirect_uri=|code_challenge|code_verifier|pkce)"
+      "auth_openid|(\.well-known/openid-configuration|id_token|nonce=|/userinfo)"
+      "auth_saml|(SAMLRequest|SAMLResponse|/saml/|samlp:)"
+      "auth_providers|(auth0\.com|okta\.com|onelogin\.com|pingidentity|cognito-idp\.[a-z0-9-]+\.amazonaws\.com|login\.microsoftonline\.com|accounts\.google\.com)"
+
+      # --- Client-side vuln indicators (sinks/sources) ---
+      "sink_dom_xss|(\.innerHTML|\.outerHTML|document\.write|insertAdjacentHTML|\.setHTML|dangerouslySetInnerHTML)"
+      "sink_eval|(\beval\(|new Function\(|setTimeout\([^,]*['\"]|setInterval\([^,]*['\"])"
+      "sink_postmessage|(addEventListener\(['\"]message['\"]|onmessage[[:space:]]*=|\.postMessage\()"
+      "sink_open_redirect|(location\.(href|replace|assign)[[:space:]]*=|window\.location[[:space:]]*=|\.location[[:space:]]*=[[:space:]]*[A-Za-z_])"
+      "source_taint|(location\.(hash|search|href)|document\.(URL|referrer|cookie)|window\.name|URLSearchParams)"
+      "sink_prototype_pollution|(__proto__|constructor\.prototype|Object\.assign\(|\.merge\(|\.extend\()"
+      "sink_template_injection|(v-html|ng-bind-html|\{\{.*\}\}|\$\{[^}]+\}|Handlebars\.|_\.template)"
+
+      # --- Storage / client state ---
+      "storage_local|localStorage\.(setItem|getItem)"
+      "storage_session|sessionStorage\.(setItem|getItem)"
+      "storage_indexeddb|(indexedDB\.open|IDBDatabase|objectStore)"
+      "storage_cookies|(document\.cookie|Cookies\.set|js-cookie)"
+
+      # --- Crypto ---
+      "crypto_usage|(crypto\.subtle|window\.crypto|CryptoJS|forge\.|sjcl\.|createCipheriv|createHash\()"
+
+      # --- Third-party / analytics / payment ---
+      "thirdparty_analytics|(google-analytics\.com|googletagmanager\.com|gtag\(|segment\.com|mixpanel|amplitude|hotjar|fullstory|sentry\.io|bugsnag|datadoghq)"
+      "thirdparty_payment|(stripe\.com|js\.stripe\.com|braintreegateway|paypal\.com/sdk|checkout\.com|adyen|square(up)?\.com|razorpay)"
+      "thirdparty_maps|(maps\.googleapis\.com|mapbox\.com|api\.tomtom\.com)"
+      "thirdparty_cdn|(cdnjs\.cloudflare\.com|jsdelivr\.net|unpkg\.com|cdn\.jsdelivr)"
+
+      # --- AI / LLM / vector ---
+      "ai_endpoints|(api\.openai\.com|api\.anthropic\.com|generativelanguage\.googleapis|api\.cohere|huggingface\.co|/v1/(chat/completions|completions|embeddings)|pinecone\.io|weaviate|qdrant|/vectors?/)"
+
+      # --- Config / feature flags / debug ---
+      "config_feature_flags|(featureFlag|feature_flag|launchdarkly|split\.io|unleash|isEnabled\(|toggles?\[)"
+      "config_debug|(debug[[:space:]]*[:=][[:space:]]*true|DEBUG[[:space:]]*=[[:space:]]*true|console\.(debug|trace)|__DEV__)"
+      "config_env_leak|(process\.env\.[A-Z_]+|import\.meta\.env\.[A-Z_]+|window\.__ENV__|window\.__CONFIG__)"
+
+      # --- Security headers referenced in JS ---
+      "security_csp_cors|(Content-Security-Policy|Access-Control-Allow-Origin|crossorigin|withCredentials[[:space:]]*[:=][[:space:]]*true)"
+
+      # --- Modern app structure ---
+      "structure_dynamic_import|(import\([\`'\"]|require\.ensure|__webpack_require__|loadChunk|import\(/\* webpackChunkName)"
+      "structure_workers|(new Worker\(|new SharedWorker\(|navigator\.serviceWorker|registerServiceWorker|workbox)"
+      "structure_wasm|(WebAssembly\.|\.wasm['\"])"
+
+      # --- Source maps ---
+      "sourcemaps|(sourceMappingURL=[A-Za-z0-9._/-]+\.map|//# sourceMappingURL)"
+    )
+
+    local summary="$out_dir/_SUMMARY.txt"
+    : > "$summary"
+    {
+        echo "=== RecoGun JS Analysis Summary ==="
+        echo "Files analyzed: $count"
+        echo "Generated: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo ""
+        printf "%-32s %s\n" "CATEGORY" "HITS"
+        printf "%-32s %s\n" "--------" "----"
+    } >> "$summary"
+
+    for entry in "${PATTERNS[@]}"; do
+        local cat="${entry%%|*}"
+        local rx="${entry#*|}"
+        local of="$out_dir/${cat}.txt"
+        # -h no filename, -o only match, -i case-insensitive, -E extended
+        grep -rhoiE "$rx" $files 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sort -u > "$of"
+        if [ -s "$of" ]; then
+            printf "%-32s %s\n" "$cat" "$(wc -l < "$of")" >> "$summary"
+        else
+            rm -f "$of"
+        fi
+    done
+
+    # --- External specialist tools, used when installed (graceful skip) ---
+    # These complement the built-in regex pass with maintained rule sets.
+    if command -v trufflehog &>/dev/null; then
+        log_message "[+] Running trufflehog (verified secrets)..." "$BLUE"
+        trufflehog filesystem "$js_dir" --no-update --json > "$out_dir/_trufflehog.json" 2>>"$CURRENT_LOG" || true
+        [ -s "$out_dir/_trufflehog.json" ] && printf "%-32s %s\n" "trufflehog_findings" "$(wc -l < "$out_dir/_trufflehog.json")" >> "$summary"
+    fi
+    # SecretFinder / LinkFinder / endext operate per-file on JS.
+    local jf
+    if command -v secretfinder &>/dev/null || command -v SecretFinder.py &>/dev/null; then
+        local sf; sf=$(command -v secretfinder || command -v SecretFinder.py)
+        log_message "[+] Running SecretFinder..." "$BLUE"
+        for jf in $files; do "$sf" -i "$jf" -o cli >> "$out_dir/_secretfinder.txt" 2>>"$CURRENT_LOG" || true; done
+        [ -s "$out_dir/_secretfinder.txt" ] && printf "%-32s %s\n" "secretfinder_lines" "$(wc -l < "$out_dir/_secretfinder.txt")" >> "$summary"
+    fi
+    if command -v linkfinder &>/dev/null || command -v LinkFinder.py &>/dev/null; then
+        local lf; lf=$(command -v linkfinder || command -v LinkFinder.py)
+        log_message "[+] Running LinkFinder (endpoint extraction)..." "$BLUE"
+        for jf in $files; do "$lf" -i "$jf" -o cli >> "$out_dir/_linkfinder.txt" 2>>"$CURRENT_LOG" || true; done
+        [ -s "$out_dir/_linkfinder.txt" ] && { sort -u "$out_dir/_linkfinder.txt" -o "$out_dir/_linkfinder.txt"; printf "%-32s %s\n" "linkfinder_endpoints" "$(wc -l < "$out_dir/_linkfinder.txt")" >> "$summary"; }
+    fi
+    if command -v endext &>/dev/null; then
+        log_message "[+] Running endext (endpoint extraction)..." "$BLUE"
+        for jf in $files; do endext -f "$jf" >> "$out_dir/_endext.txt" 2>>"$CURRENT_LOG" || true; done
+        [ -s "$out_dir/_endext.txt" ] && { sort -u "$out_dir/_endext.txt" -o "$out_dir/_endext.txt"; printf "%-32s %s\n" "endext_endpoints" "$(wc -l < "$out_dir/_endext.txt")" >> "$summary"; }
+    fi
+
+    log_message "[OK] JS analysis complete - see $out_dir/_SUMMARY.txt" "$GREEN"
+}
+
 # Apply -t/-e (TOOLS_TO_RUN/TOOLS_TO_EXCLUDE) to any "name:command" array -
 # shared by passive-enum and crawling, so excluding a tool by name works the
 # same way regardless of which phase it belongs to.
@@ -799,6 +1023,11 @@ process_domain() {
             grep -E '\.js(\?|$)' "$crawl_final" > "$domain_output_dir/crawling/javascript_files.txt" 2>/dev/null
             grep -E '(/api/|/v[0-9]+/|\.json|/graphql)' "$crawl_final" > "$domain_output_dir/crawling/api_endpoints.txt" 2>/dev/null
 
+            # Auto-download JS content so the jsanalysis phase (and you) have
+            # the actual files, not just URLs. Parallel, capped, deduped by a
+            # safe filename derived from the URL.
+            download_js_files "$domain_output_dir/crawling/javascript_files.txt" "$domain_output_dir/js_files"
+
             local urls_for_tagging="$crawl_final"
             if command -v uro &>/dev/null; then
                 log_message "[+] Filtering URLs with uro..." "$BLUE"
@@ -819,6 +1048,42 @@ process_domain() {
             fi
         else
             log_message "[!] No crawling results found" "$YELLOW"
+        fi
+    fi
+
+    # ---- Phase 6b: JS intelligence analysis (opt-in via --only jsanalysis) ----
+    # Offline extraction over downloaded JS. Sources of JS, in priority order:
+    # this run's js_files/ (from crawl), or -f as a JS-URL list to download now.
+    if phase_enabled jsanalysis; then
+        local js_src_dir="$domain_output_dir/js_files"
+        # Standalone mode: --only jsanalysis -f jsurls.txt (no crawl this run).
+        if [ ! -d "$js_src_dir" ] || [ -z "$(find "$js_src_dir" -maxdepth 1 -name '*.js' 2>/dev/null)" ]; then
+            if [ -n "$INPUT_HOSTS_FILE" ]; then
+                log_message "[*] jsanalysis: downloading JS from $INPUT_HOSTS_FILE..." "$BLUE"
+                download_js_files "$INPUT_HOSTS_FILE" "$js_src_dir"
+            fi
+        fi
+        if [ -d "$js_src_dir" ] && [ -n "$(find "$js_src_dir" -maxdepth 1 -name '*.js' 2>/dev/null)" ]; then
+            analyze_js "$js_src_dir" "$domain_output_dir/js_analysis"
+            # Historical diff: which findings are NEW vs the previous scan.
+            if [[ -n "$PREV_DIR" && -d "$PREV_DIR/js_analysis" ]]; then
+                mkdir -p "$domain_output_dir/js_analysis/new"
+                for cf in "$domain_output_dir/js_analysis"/*.txt; do
+                    [ -f "$cf" ] || continue
+                    local bn; bn=$(basename "$cf")
+                    [[ "$bn" == _* ]] && continue
+                    if [ -f "$PREV_DIR/js_analysis/$bn" ]; then
+                        comm -13 <(sort -u "$PREV_DIR/js_analysis/$bn") <(sort -u "$cf") > "$domain_output_dir/js_analysis/new/$bn"
+                        [ -s "$domain_output_dir/js_analysis/new/$bn" ] || rm -f "$domain_output_dir/js_analysis/new/$bn"
+                    else
+                        cp "$cf" "$domain_output_dir/js_analysis/new/$bn"
+                    fi
+                done
+                [ -n "$(ls -A "$domain_output_dir/js_analysis/new" 2>/dev/null)" ] && \
+                    log_message "[i] New JS findings since last scan in js_analysis/new/" "$CYAN"
+            fi
+        else
+            log_message "[!] jsanalysis: no JS files available (run with crawl, or supply -f <jsurls.txt>)" "$YELLOW"
         fi
     fi
 
@@ -1006,6 +1271,13 @@ check_dependencies() {
     _dep_check "Crawling" uro ""
     _dep_check "Crawling" paramx ""
 
+    # JS analysis works with zero external tools (built-in regex engine), but
+    # these add maintained rule sets / extractors when present.
+    _dep_check "JS analysis (optional boosters)" trufflehog ""
+    _dep_check "JS analysis (optional boosters)" secretfinder ""
+    _dep_check "JS analysis (optional boosters)" linkfinder ""
+    _dep_check "JS analysis (optional boosters)" endext ""
+
     echo ""
     echo -e "${CYAN}Origin IP discovery (-o) - favicon hashing${RESET}"
     total=$((total + 1))
@@ -1087,7 +1359,8 @@ show_usage() {
     echo "  full <target>       Everything: enum, bruteforce, probe, origin, ports, takeover, crawl"
     echo "  enum <target>       Only find subdomains"
     echo "  probe <target>      Only enum + httpx probe (which subdomains are live)"
-    echo "  crawl <target>      Only crawl (waymore/waybackurls/gau/katana)"
+    echo "  crawl <target>      Crawl (waymore/waybackurls/gau/katana) + JS analysis"
+    echo "  js <jsurls.txt>     Only JS intelligence analysis on a list of .js URLs"
     echo "  origin <target>     Only origin-IP-behind-WAF discovery"
     echo "  ports <target>      Only passive port discovery (naabu -passive)"
     echo "  takeover <target>   Only subdomain-takeover checks"
@@ -1118,6 +1391,8 @@ show_usage() {
     echo "  recogun enum domains.txt -o subs/"
     echo "  recogun run enum,takeover example.com"
     echo "  recogun origin example.com"
+    echo "  recogun js js_urls.txt                   # analyze a list of JS file URLs"
+    echo "  recogun crawl example.com                # crawl then auto-analyze its JS"
 }
 
 # Translate a subcommand into the explicit phase list the engine runs. The
@@ -1125,13 +1400,14 @@ show_usage() {
 set_phases_for_command() {
     case "$1" in
         scan)     ONLY_PHASES=(enum probe takeover) ;;
-        full)     ONLY_PHASES=(enum bruteforce probe origin ports takeover crawl) ;;
+        full)     ONLY_PHASES=(enum bruteforce probe origin ports takeover crawl jsanalysis) ;;
         enum)     ONLY_PHASES=(enum) ;;
         probe)    ONLY_PHASES=(enum probe) ;;
-        crawl)    ONLY_PHASES=(crawl) ;;
+        crawl)    ONLY_PHASES=(crawl jsanalysis) ;;
         origin)   ONLY_PHASES=(origin) ;;
         ports)    ONLY_PHASES=(enum probe ports) ;;
         takeover) ONLY_PHASES=(enum probe takeover) ;;
+        js)       ONLY_PHASES=(jsanalysis) ;;
         *)        return 1 ;;
     esac
 }
@@ -1176,7 +1452,7 @@ case "$COMMAND" in
         check_dependencies; exit 0 ;;
     update)
         check_for_updates true; exit 0 ;;
-    scan|full|enum|probe|crawl|origin|ports|takeover)
+    scan|full|enum|probe|crawl|origin|ports|takeover|js)
         set_phases_for_command "$COMMAND"
         TARGET="${1:-}"; [ $# -gt 0 ] && shift ;;
     run)
@@ -1224,10 +1500,10 @@ if [ -z "$TARGET" ]; then
     show_usage; exit 1
 fi
 
-VALID_PHASES=" enum bruteforce probe origin ports takeover crawl "
+VALID_PHASES=" enum bruteforce probe origin ports takeover crawl jsanalysis "
 for ph in "${ONLY_PHASES[@]}"; do
     if [[ "$VALID_PHASES" != *" $ph "* ]]; then
-        echo -e "${RED}Error: unknown phase '$ph'. Valid: enum, bruteforce, probe, origin, ports, takeover, crawl${RESET}"
+        echo -e "${RED}Error: unknown phase '$ph'. Valid: enum, bruteforce, probe, origin, ports, takeover, crawl, jsanalysis${RESET}"
         exit 1
     fi
 done
@@ -1241,13 +1517,14 @@ $PERMUTATION_WORDLIST_CUSTOM && [ ! -f "$PERMUTATION_WORDLIST" ] && { echo -e "$
 # --- Resolve target into a run mode ---
 TARGET_KIND=$(detect_target_kind "$TARGET")
 
-# Phases that consume a host list rather than producing one.
+# Phases that consume a host/URL list rather than producing one. jsanalysis
+# is included: with no crawl in the run it needs a JS-URL file as its target.
 needs_hosts=false
-for ph in crawl takeover ports; do
+for ph in crawl takeover ports jsanalysis; do
     [[ " ${ONLY_PHASES[*]} " == *" $ph "* ]] && needs_hosts=true
 done
 have_producer=false
-{ [[ " ${ONLY_PHASES[*]} " == *" enum "* ]] || [[ " ${ONLY_PHASES[*]} " == *" probe "* ]]; } && have_producer=true
+{ [[ " ${ONLY_PHASES[*]} " == *" enum "* ]] || [[ " ${ONLY_PHASES[*]} " == *" probe "* ]] || [[ " ${ONLY_PHASES[*]} " == *" crawl "* ]]; } && have_producer=true
 
 mkdir -p "$OUTPUT_DIR"
 [ -n "$OUTPUT_COLLECT_DIR" ] && mkdir -p "$OUTPUT_COLLECT_DIR"
@@ -1256,7 +1533,7 @@ check_for_updates
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v6.1                |"
+echo "  |              RecoGun v6.2                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  |                 by $OPERATOR                 |"
 echo "  +=========================================+"

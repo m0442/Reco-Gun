@@ -53,10 +53,11 @@ list of domains, or a list of hosts), and tweak with a few options.
 | Command | What it runs |
 |---|---|
 | `scan <target>` | Default recon — enum → probe → takeover |
-| `full <target>` | Everything — enum, bruteforce, probe, origin, ports, takeover, crawl |
+| `full <target>` | Everything — enum, bruteforce, probe, origin, ports, takeover, crawl, jsanalysis |
 | `enum <target>` | Only find subdomains |
 | `probe <target>` | enum + httpx (which subdomains are live) |
-| `crawl <target>` | Only crawl (waymore/waybackurls/gau/katana) |
+| `crawl <target>` | Crawl (waymore/waybackurls/gau/katana) + download & analyze JS |
+| `js <jsurls.txt>` | Only JS intelligence analysis on a list of `.js` URLs |
 | `origin <target>` | Only origin-IP-behind-WAF discovery |
 | `ports <target>` | enum + probe + passive port discovery (`naabu -passive`) |
 | `takeover <target>` | enum + probe + subdomain-takeover checks |
@@ -65,7 +66,7 @@ list of domains, or a list of hosts), and tweak with a few options.
 | `update` | Check for a newer RecoGun version, then exit |
 
 Phase names for `run`: `enum`, `bruteforce`, `probe`, `origin`, `ports`,
-`takeover`, `crawl`.
+`takeover`, `crawl`, `jsanalysis`.
 
 ## Targets (auto-detected)
 
@@ -118,7 +119,10 @@ starts, so you can see exactly what's about to happen.
 7. **crawl** — waymore, waybackurls, gau, katana (parallel); merged, diffed,
    deduped with `uro`, split into JS files and API-shaped endpoints. If
    `paramx` is installed, parameterized URLs are tagged by likely vuln class
-   for triage — classification only, no payloads sent.
+   for triage — classification only, no payloads sent. JS URLs are also
+   **downloaded** into `js_files/` and passed to jsanalysis.
+8. **jsanalysis** — full JavaScript intelligence over the downloaded JS
+   (offline, no requests to the target). See the section below.
 
 Every run also writes `report.txt` (human) and `report.json` (machine-readable),
 and diffs subdomains / active hosts / URLs against the previous run for the
@@ -144,6 +148,39 @@ patterns, so RecoGun doesn't silently swap it out for a generic wordlist —
 `--perms` only replaces alterx's `word` payload outright when you pass it.
 
 ## Feature guides
+
+### JavaScript intelligence (`js` / `jsanalysis`)
+
+The `crawl` phase downloads every `.js` it finds into `js_files/`, then the
+`jsanalysis` phase mines that content **offline** (no requests to the target)
+for attack surface. You can also run it standalone against a list of JS URLs:
+
+```bash
+recogun crawl example.com          # crawl, download JS, then analyze it
+recogun js js_urls.txt             # analyze a list of .js URLs directly
+```
+
+Output lands in `results/<domain>_<ts>/js_analysis/` — one `.txt` per
+category plus `_SUMMARY.txt` with hit counts. Findings that are new versus
+the previous scan are mirrored into `js_analysis/new/`.
+
+Categories extracted (built-in regex engine, ~60 categories):
+
+- **Secrets** — AWS keys, Google API keys, GCP OAuth, Firebase, Slack, GitHub/GitLab PATs, Stripe/Square/Braintree, Twilio, SendGrid, Mailgun, npm, OpenAI/Anthropic, JWTs, private keys, bearer tokens, generic `apiKey`/`secret`/`password` assignments
+- **Cloud** — S3, CloudFront, Azure Blob/other, GCS, GCP Functions, Firebase, DO Spaces
+- **Endpoints** — paths, `/api|/v1|/graphql|/admin`, WebSocket, absolute URLs, upload/download/admin/debug routes
+- **Infra** — internal hostnames, IPs, staging/preprod references
+- **Auth** — OAuth/PKCE, OpenID, SAML, hosted IdPs (Auth0/Okta/Cognito/…)
+- **Client-side sinks/sources** — DOM XSS sinks, `eval`, `postMessage`, open-redirect, taint sources, prototype-pollution, template-injection
+- **Storage** — localStorage, sessionStorage, IndexedDB, cookies
+- **Third-party** — analytics, payment providers, maps, CDNs
+- **AI/LLM** — OpenAI/Anthropic/Gemini/Cohere/HuggingFace endpoints, vector DBs
+- **Config** — feature flags, debug flags, `process.env`/`import.meta.env` leaks
+- **Structure** — dynamic imports, web/service workers, WASM, source maps
+
+**Optional boosters** (used when installed, skipped otherwise): `trufflehog`
+(verified secrets), `SecretFinder`, `LinkFinder`, `endext`. The built-in
+engine needs none of them — it works with just `curl`, `grep`, `sort`.
 
 ### Setting up the `origin` phase
 
