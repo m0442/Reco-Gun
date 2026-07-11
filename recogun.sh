@@ -322,6 +322,44 @@ resolve_py_tool() {
     return 1
 }
 
+# Strip junk from a category's raw matches (reads stdin, writes stdout).
+# Minified JS makes broad patterns match huge garbage strings and version
+# numbers; this trims the worst of it so the findings stay readable.
+#   - universal: drop empty / quote-only lines and absurdly long blobs (>200
+#     chars is never a useful endpoint/secret, it's a minified chunk).
+#   - infra_ip_addresses: drop version-number-looking hits and reserved/local
+#     ranges (0.*, 127.*, 10.*, 192.168.*, 255.*) that are almost always noise;
+#     also drop anything with an octet > 255 (that's a version string, not an IP).
+#   - endpoints_paths: drop single-segment noise like "/" or "/x" and paths that
+#     are just punctuation - keep things that look like real routes.
+_js_denoise() {
+    local cat="$1"
+    awk -v cat="$cat" '
+    {
+        line = $0
+        gsub(/^[\x27"]+|[\x27"]+$/, "", line)   # strip surrounding quotes
+        if (line == "" || length(line) > 200) next
+    }
+    cat == "infra_ip_addresses" {
+        if (line !~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/) next
+        n = split(line, o, ".")
+        bad = 0
+        for (i=1;i<=4;i++) if (o[i]+0 > 255) bad = 1
+        if (bad) next
+        if (o[1]+0==0 || o[1]+0==127 || o[1]+0==10 || o[1]+0==255) next
+        if (o[1]+0==192 && o[2]+0==168) next
+        if (o[1]+0==169 && o[2]+0==254) next
+        print line; next
+    }
+    cat == "endpoints_paths" {
+        if (line !~ /^\/[A-Za-z0-9]/) next        # must start /<alnum>
+        if (length(line) < 4) next                # "/x" etc. - too short to matter
+        print line; next
+    }
+    { print line }
+    '
+}
+
 # Full JavaScript intelligence extraction over a folder of downloaded .js
 # files. Everything here is offline pattern-matching against already-fetched
 # content - no requests to the target. Each category writes its own file so
@@ -491,6 +529,7 @@ analyze_js() {
         for f in $files; do
             grep -hoiE "$rx" "$f" 2>/dev/null \
                 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+                | _js_denoise "$cat" \
                 | sort -u \
                 | sed "s#^#$(basename "$f")\t#"
         done > "$of.tmp"
@@ -570,9 +609,55 @@ analyze_js() {
     # --- External specialist tools, used when installed (graceful skip) ---
     # These complement the built-in regex pass with maintained rule sets.
     if command -v trufflehog &>/dev/null; then
-        log_message "[+] Running trufflehog (verified secrets)..." "$BLUE"
-        trufflehog filesystem "$js_dir" --no-update --json > "$out_dir/_trufflehog.json" 2>>"$CURRENT_LOG" || true
-        [ -s "$out_dir/_trufflehog.json" ] && printf "%-32s %s\n" "trufflehog_findings" "$(wc -l < "$out_dir/_trufflehog.json")" >> "$summary"
+        log_message "[+] Running trufflehog (--only-verified)..." "$BLUE"
+        # --only-verified: trufflehog live-checks each candidate against its
+        # provider and drops the ones that don't authenticate. This is the big
+        # noise/false-positive cut - unverified heuristic guesses are gone.
+        # --results=verified belts-and-braces on older builds that ignore the
+        # flag name. Raw JSON kept as _trufflehog_raw.json; the readable summary
+        # below is what you actually look at.
+        trufflehog filesystem "$js_dir" --no-update --only-verified --json \
+            > "$out_dir/_trufflehog_raw.json" 2>>"$CURRENT_LOG" || true
+
+        if [ -s "$out_dir/_trufflehog_raw.json" ] && command -v jq &>/dev/null; then
+            local th_report="$out_dir/_trufflehog_verified.txt"
+            {
+                echo "=== trufflehog - VERIFIED secrets only ==="
+                echo "Each secret below authenticated against its provider (not a guess)."
+                echo ""
+            } > "$th_report"
+            # One block per verified finding: detector, the (redacted) secret,
+            # the local JS file, and - resolved from our .url sidecar - the live
+            # source URL it came from, so a finding links straight back to source.
+            local th_count=0
+            while IFS=$'\t' read -r detector raw file; do
+                [ -z "$detector" ] && continue
+                th_count=$((th_count + 1))
+                local src_url="(unknown)"
+                [ -f "$file.url" ] && src_url=$(cat "$file.url")
+                # redact the middle of the secret - enough to confirm, not to leak
+                local red="${raw:0:6}...${raw: -4}"
+                {
+                    echo "[$th_count] $detector"
+                    echo "    secret : $red   (len ${#raw})"
+                    echo "    file   : $(basename "$file")"
+                    echo "    source : $src_url"
+                    echo ""
+                } >> "$th_report"
+            done < <(jq -r 'select(.Verified==true)
+                            | [ (.DetectorName // "unknown"),
+                                (.Raw // .Redacted // ""),
+                                (.SourceMetadata.Data.Filesystem.file // "") ]
+                            | @tsv' "$out_dir/_trufflehog_raw.json" 2>/dev/null)
+
+            if [ "$th_count" -gt 0 ]; then
+                printf "%-32s %s\n" "trufflehog_verified" "$th_count" >> "$summary"
+                log_message "[OK] trufflehog: $th_count VERIFIED secret(s) - see _trufflehog_verified.txt" "$GREEN"
+            else
+                rm -f "$th_report"
+                log_message "[i] trufflehog: no verified secrets" "$CYAN"
+            fi
+        fi
     fi
     # SecretFinder / LinkFinder / endext operate per-file on JS. SecretFinder
     # and LinkFinder are Python scripts rarely on $PATH as a bare command, so we
@@ -1864,7 +1949,7 @@ check_for_updates
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v6.8                |"
+echo "  |              RecoGun v6.9                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  |                 by $OPERATOR                 |"
 echo "  +=========================================+"
