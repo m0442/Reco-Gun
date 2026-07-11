@@ -53,8 +53,9 @@ list of domains, or a list of hosts), and tweak with a few options.
 | Command | What it runs |
 |---|---|
 | `scan <target>` | Default recon — enum → probe → takeover |
-| `full <target>` | Everything — enum, bruteforce, probe, origin, ports, takeover, crawl, jsanalysis, params |
+| `full <target>` | Everything **except bruteforce** — enum, probe, origin, ports, takeover, crawl, jsanalysis, params |
 | `enum <target>` | Only find subdomains |
+| `bruteforce <target>` | enum + DNS permutation/bruteforce (dnsgen/alterx → shuffledns) + probe. **Heavy/slow — opt-in only** |
 | `probe <target>` | enum + httpx (which subdomains are live) |
 | `crawl <target>` | Crawl (waymore/waybackurls/gau/urlfinder/katana/hakrawler) + download & analyze JS |
 | `js <jsurls.txt>` | Only JS intelligence analysis on a list of `.js` URLs |
@@ -110,10 +111,14 @@ starts, so you can see exactly what's about to happen.
    Each candidate gets a direct GET (`curl --resolve`, Host header spoofed)
    compared against the normal response's status + `<title>` — a heuristic,
    not proof; matches land in `verified_origin_ips.txt`.
-3. **bruteforce** — resolvers validated first (dead ones dropped);
-   dnsgen/alterx permutate *from subdomains already found*, resolved via
-   shuffledns; puredns bruteforces a wordlist; dnsrecon runs standard
-   enumeration. Re-merged, re-filtered. Skipped automatically on wildcard DNS.
+3. **bruteforce** *(opt-in — not in `full`)* — resolvers validated first (dead
+   ones dropped); dnsgen/alterx permutate *from subdomains already found*,
+   resolved via shuffledns; puredns bruteforces a wordlist; dnsrecon runs
+   standard enumeration. Re-merged, re-filtered. Skipped automatically on
+   wildcard DNS. This is the heaviest DNS step — dnsgen can emit ~1M names, so
+   the resolve is capped (`MAX_PERMUTATIONS`, default 150k) and timeout-bounded
+   (`SHUFFLEDNS_TIMEOUT_SECONDS`, default 1800). Run it only when you want it:
+   `recogun bruteforce <target>` or `run enum,bruteforce,... <target>`.
 4. **probe** — httpx confirms live hosts, diffed against the previous run.
 5. **ports** — `naabu -passive`, no direct scanning of the target.
 6. **takeover** — subzy against live subdomains.

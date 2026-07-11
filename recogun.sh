@@ -1682,12 +1682,12 @@ check_dependencies() {
     _dep_check "Passive subdomain enumeration" github-subdomains GITHUB_TOKEN
     _dep_check "Passive subdomain enumeration" gitlab-subdomains GITLAB_TOKEN
 
-    _dep_check "Permutation + bruteforce (-b)" dig ""
-    _dep_check "Permutation + bruteforce (-b)" dnsgen ""
-    _dep_check "Permutation + bruteforce (-b)" alterx ""
-    _dep_check "Permutation + bruteforce (-b)" shuffledns ""
-    _dep_check "Permutation + bruteforce (-b)" puredns ""
-    _dep_check "Permutation + bruteforce (-b)" dnsrecon ""
+    _dep_check "Permutation + bruteforce (bruteforce cmd)" dig ""
+    _dep_check "Permutation + bruteforce (bruteforce cmd)" dnsgen ""
+    _dep_check "Permutation + bruteforce (bruteforce cmd)" alterx ""
+    _dep_check "Permutation + bruteforce (bruteforce cmd)" shuffledns ""
+    _dep_check "Permutation + bruteforce (bruteforce cmd)" puredns ""
+    _dep_check "Permutation + bruteforce (bruteforce cmd)" dnsrecon ""
 
     _dep_check "Passive port discovery (-p)" naabu ""
 
@@ -1793,8 +1793,9 @@ show_usage() {
     echo ""
     echo -e "${GREEN}Commands:${RESET}"
     echo "  scan <target>       Default recon: enum -> probe -> takeover"
-    echo "  full <target>       Everything: enum, bruteforce, probe, origin, ports, takeover, crawl, params"
+    echo "  full <target>       Everything EXCEPT bruteforce: enum, probe, origin, ports, takeover, crawl, params"
     echo "  enum <target>       Only find subdomains"
+    echo "  bruteforce <target> enum + DNS permutation/bruteforce (dnsgen/alterx -> shuffledns) + probe. Heavy/slow - opt-in only."
     echo "  probe <target>      Only enum + httpx probe (which subdomains are live)"
     echo "  crawl <target>      Crawl (waymore/wayback/gau/urlfinder/katana/hakrawler) + JS analysis"
     echo "  js <jsurls.txt>     Only JS intelligence analysis on a list of .js URLs"
@@ -1837,17 +1838,22 @@ show_usage() {
 # engine is driven entirely by ONLY_PHASES, so every command just sets it.
 set_phases_for_command() {
     case "$1" in
-        scan)     ONLY_PHASES=(enum probe takeover) ;;
-        full)     ONLY_PHASES=(enum bruteforce probe origin ports takeover crawl jsanalysis params) ;;
-        enum)     ONLY_PHASES=(enum) ;;
-        probe)    ONLY_PHASES=(enum probe) ;;
-        crawl)    ONLY_PHASES=(crawl jsanalysis) ;;
-        origin)   ONLY_PHASES=(origin) ;;
-        ports)    ONLY_PHASES=(enum probe ports) ;;
-        takeover) ONLY_PHASES=(enum probe takeover) ;;
-        js)       ONLY_PHASES=(jsanalysis) ;;
-        params)   ONLY_PHASES=(crawl params) ;;
-        *)        return 1 ;;
+        scan)       ONLY_PHASES=(enum probe takeover) ;;
+        # 'full' deliberately does NOT include bruteforce: DNS permutation +
+        # resolve is heavy (can generate ~1M names, take hours) and is now
+        # opt-in only. Add it explicitly with the 'bruteforce' command or
+        # 'run enum,bruteforce,...' when you actually want it.
+        full)       ONLY_PHASES=(enum probe origin ports takeover crawl jsanalysis params) ;;
+        enum)       ONLY_PHASES=(enum) ;;
+        bruteforce) ONLY_PHASES=(enum bruteforce probe) ;;
+        probe)      ONLY_PHASES=(enum probe) ;;
+        crawl)      ONLY_PHASES=(crawl jsanalysis) ;;
+        origin)     ONLY_PHASES=(origin) ;;
+        ports)      ONLY_PHASES=(enum probe ports) ;;
+        takeover)   ONLY_PHASES=(enum probe takeover) ;;
+        js)         ONLY_PHASES=(jsanalysis) ;;
+        params)     ONLY_PHASES=(crawl params) ;;
+        *)          return 1 ;;
     esac
 }
 
@@ -1891,7 +1897,7 @@ case "$COMMAND" in
         check_dependencies; exit 0 ;;
     update)
         check_for_updates true; exit 0 ;;
-    scan|full|enum|probe|crawl|origin|ports|takeover|js|params)
+    scan|full|enum|bruteforce|probe|crawl|origin|ports|takeover|js|params)
         set_phases_for_command "$COMMAND"
         TARGET="${1:-}"; [ $# -gt 0 ] && shift ;;
     run)
@@ -1973,7 +1979,7 @@ check_for_updates
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v7.0                |"
+echo "  |              RecoGun v7.1                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  |                 by $OPERATOR                 |"
 echo "  +=========================================+"
