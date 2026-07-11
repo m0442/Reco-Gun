@@ -47,6 +47,12 @@ WORDLIST_FILE="${WORDLIST_FILE:-$WORDLISTS_DIR/subdomains.txt}"
 PERMUTATION_WORDLIST="${PERMUTATION_WORDLIST:-$WORDLISTS_DIR/permutations.txt}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-300}"
 CRAWL_TIMEOUT_SECONDS="${CRAWL_TIMEOUT_SECONDS:-1800}"
+# Resolving permutations is the slowest DNS step. dnsgen can emit ~1M names from
+# a large seed list, which over a handful of resolvers takes hours. Cap the list
+# fed to shuffledns (0 = no cap) and give the resolve its own generous timeout.
+MAX_PERMUTATIONS="${MAX_PERMUTATIONS:-150000}"
+SHUFFLEDNS_TIMEOUT_SECONDS="${SHUFFLEDNS_TIMEOUT_SECONDS:-1800}"
+SHUFFLEDNS_THREADS="${SHUFFLEDNS_THREADS:-10000}"
 PARALLEL_JOBS="${PARALLEL_JOBS:-8}"
 HTTPX_THREADS="${HTTPX_THREADS:-100}"
 ACTIVE_SUBDOMAINS=""
@@ -1156,10 +1162,28 @@ process_domain() {
             cat "$domain_output_dir/bruteforce/dnsgen.txt" "$domain_output_dir/bruteforce/alterx.txt" 2>/dev/null \
                 | sed '/^\s*$/d' | sort -u > "$permutations_combined"
 
-            if [ -s "$permutations_combined" ] && [ -s "$resolvers_valid" ] && command -v shuffledns &>/dev/null; then
-                run_tool "shuffledns-resolve" "shuffledns -d $domain -list $permutations_combined -r $resolvers_valid -mode resolve -silent" \
-                    "$domain_output_dir/bruteforce/shuffledns_resolved.txt"
-            elif [ -s "$permutations_combined" ]; then
+            # Cap the list before resolving. dnsgen from a big seed can emit
+            # ~1M names; resolving that over a few resolvers takes hours (and
+            # was hanging runs). MAX_PERMUTATIONS=0 disables the cap.
+            local perm_total resolve_list
+            perm_total=$(wc -l < "$permutations_combined" | tr -d ' ')
+            resolve_list="$permutations_combined"
+            if [ "$MAX_PERMUTATIONS" -gt 0 ] && [ "$perm_total" -gt "$MAX_PERMUTATIONS" ]; then
+                resolve_list="$domain_output_dir/bruteforce/permutations_capped.txt"
+                head -n "$MAX_PERMUTATIONS" "$permutations_combined" > "$resolve_list"
+                log_message "[!] $perm_total permutations generated - capping resolve to $MAX_PERMUTATIONS (raise/disable with MAX_PERMUTATIONS in config.env). Full list kept in permutations_combined.txt." "$YELLOW"
+            fi
+
+            if [ -s "$resolve_list" ] && [ -s "$resolvers_valid" ] && command -v shuffledns &>/dev/null; then
+                # -t: concurrent DNS queries (default is low). Give the resolve a
+                # generous, separate timeout - it's the slowest DNS step and the
+                # default TIMEOUT_SECONDS (300s) is far too short for 100k+ names.
+                log_message "[*] Resolving $(count_unique_results "$resolve_list") permutations via shuffledns (timeout ${SHUFFLEDNS_TIMEOUT_SECONDS}s)..." "$BLUE"
+                run_tool "shuffledns-resolve" \
+                    "shuffledns -d $domain -list $resolve_list -r $resolvers_valid -mode resolve -t $SHUFFLEDNS_THREADS -silent" \
+                    "$domain_output_dir/bruteforce/shuffledns_resolved.txt" \
+                    "$SHUFFLEDNS_TIMEOUT_SECONDS"
+            elif [ -s "$resolve_list" ]; then
                 log_message "[!] shuffledns or validated resolvers not available - permutations generated but not resolved" "$YELLOW"
             fi
         fi
@@ -1949,7 +1973,7 @@ check_for_updates
 
 echo -e "${PURPLE}"
 echo "  +=========================================+"
-echo "  |              RecoGun v6.9                |"
+echo "  |              RecoGun v7.0                |"
 echo "  |    Automated Reconnaissance Tool         |"
 echo "  |                 by $OPERATOR                 |"
 echo "  +=========================================+"
